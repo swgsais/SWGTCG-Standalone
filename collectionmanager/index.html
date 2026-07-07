@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SWGTCG -- Collection &amp; Deck Manager</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<header id="topbar">
+  <div class="brand">
+    <span class="logo">SWG&#8226;TCG</span>
+    <span class="sub">Collection &amp; Deck Manager <em>(offline)</em></span>
+  </div>
+  <div class="conn">
+    <button id="btnOpenDb" class="primary">Open Account DB</button>
+    <label class="acctlabel">Account <select id="acct" disabled></select></label>
+    <button id="btnSave" disabled>Save to game</button>
+    <span id="connStatus" class="status">no database open</span>
+  </div>
+</header>
+
+<div id="banner" class="banner">
+  Open <code>_ext\server\swgtcg.db</code> to edit the account the game logs into.
+  <b>Stop the game/login server before saving</b> (launcher option 5), then relaunch to see changes.
+</div>
+
+<nav id="tabs">
+  <button class="tab active" data-tab="collection">Collection</button>
+  <button class="tab" data-tab="deck">Deck Builder</button>
+  <button class="tab" data-tab="help">Help</button>
+</nav>
+
+<!-- ============================ COLLECTION ============================ -->
+<section id="tab-collection" class="tabpane active">
+  <div class="toolbar">
+    <input id="colSearch" type="search" placeholder="Search name...">
+    <select id="colType"><option value="">All types</option></select>
+    <label class="chk"><input type="checkbox" id="colOwnedOnly"> Owned only</label>
+    <span class="spacer"></span>
+    <button id="colGrantAll" title="Own the max copies of every playable card">Grant all</button>
+    <button id="colClear" title="Set all owned counts to 0">Clear</button>
+  </div>
+  <div class="meta" id="colMeta">No database open.</div>
+  <div class="cardlist" id="colList"></div>
+</section>
+
+<!-- ============================ DECK BUILDER ========================== -->
+<section id="tab-deck" class="tabpane">
+  <div class="deckgrid">
+    <div class="deckleft">
+      <div class="toolbar">
+        <input id="deckSearch" type="search" placeholder="Search cards to add...">
+        <select id="deckType">
+          <option value="main">Main (Unit/Ability/Item/Tactic)</option>
+          <option value="Unit">Unit</option>
+          <option value="Ability">Ability</option>
+          <option value="Item">Item</option>
+          <option value="Tactic">Tactic</option>
+          <option value="Quest">Quest</option>
+        </select>
+        <label class="chk"><input type="checkbox" id="deckOwnedOnly"> Owned only</label>
+      </div>
+      <div class="cardlist" id="deckPool"></div>
+    </div>
+
+    <div class="deckright">
+      <div class="deckhead">
+        <input id="deckName" type="text" placeholder="Deck name" value="My Deck">
+        <div class="avatarpick">
+          <label>Avatar</label>
+          <select id="deckAvatar"></select>
+        </div>
+        <div id="deckStats" class="deckstats"></div>
+      </div>
+      <div class="decksection">
+        <h3>Quests <span id="questCount" class="pill">0</span></h3>
+        <div id="deckQuests" class="decklist"></div>
+      </div>
+      <div class="decksection">
+        <h3>Main deck <span id="mainCount" class="pill">0</span></h3>
+        <div id="deckMain" class="decklist"></div>
+      </div>
+      <div class="deckactions">
+        <select id="deckFile" title="Saved decks"></select>
+        <button id="deckLoad">Load</button>
+        <button id="deckNew">New</button>
+        <button id="deckDelete">Delete</button>
+        <span class="spacer"></span>
+        <button id="deckSave" class="primary">Save deck</button>
+      </div>
+      <div id="deckValidate" class="validate"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ HELP ================================= -->
+<section id="tab-help" class="tabpane">
+  <div class="help">
+    <h2>How this works</h2>
+    <ol>
+      <li>Click <b>Open Account DB</b> and pick
+        <code>SWGTCG-Standalone\_ext\server\swgtcg.db</code>. This is the account
+        database the game logs into &mdash; editing it here changes what you own and
+        which decks you can play in Skirmish. Works in Microsoft Edge / Chrome.</li>
+      <li>Pick the <b>Account</b> (the launcher logs in as <code>tester1</code> by default).</li>
+      <li><b>Collection</b> tab: set how many copies of each card you own.
+        <b>Deck Builder</b>: pick an avatar, add main-deck cards + quests, <b>Save deck</b>.</li>
+      <li>Click <b>Save to game</b> to write the database back. <b>Important:</b> stop the
+        game and the login server first (launcher option 5), or the save can be lost /
+        conflict. Then run Play again &mdash; your changes are read at login.</li>
+      <li>No folder access in your browser? Use <b>Import DB</b> / the Save button downloads
+        the edited <code>swgtcg.db</code> &mdash; copy it over <code>_ext\server\swgtcg.db</code>.</li>
+    </ol>
+    <p class="note">Deck rules of thumb (Standard): 1 avatar, ~50 main cards, up to 4 quests,
+      at most 4 copies of a card. The builder shows warnings but won't stop you experimenting.</p>
+    <p class="note" id="fsNote"></p>
+  </div>
+</section>
+
+<div id="log" class="log"></div>
+
+<input type="file" id="importDb" accept=".db,.sqlite,.sqlite3" style="display:none">
+
+<script src="js/sql-wasm.js"></script>
+<script src="js/sql-wasm-b64.js"></script>
+<script src="js/cards-data.js"></script>
+<script src="js/db.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

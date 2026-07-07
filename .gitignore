@@ -1,0 +1,17 @@
+# The retail Standalone client is NOT distributed here (copyright).
+# Everything under TCGStandalone/ is excluded except its placeholder README.
+/TCGStandalone/*
+!/TCGStandalone/README.md
+
+# local save snapshots
+/Backups/
+
+# server runtime artifacts (regenerated on each run)
+/_ext/server/server.log
+/_ext/server/server.err.log
+/_ext/server/captures/
+
+# python caches
+__pycache__/
+*.pyc
+*.pyo
