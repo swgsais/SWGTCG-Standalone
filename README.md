@@ -21,7 +21,7 @@ For the latest TCG updates and other Star Wars Galaxies projects:
 
 Everything under [`TCGStandalone/`](TCGStandalone/) is intentionally excluded from this
 repo except a placeholder README. Obtain the *SWG TCG Standalone* client (search the
-Internet Archive, or ask other community members) and copy its root contents into
+Internet Archive for TCGStandalone, or ask other community members) and copy its root contents into
 `TCGStandalone/` so that `TCGStandalone/SWGTCGGame.exe` exists. See
 [`TCGStandalone/README.md`](TCGStandalone/README.md) for the expected file list.
 
