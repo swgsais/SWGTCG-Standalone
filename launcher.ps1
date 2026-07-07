@@ -27,6 +27,7 @@ $Ext     = Join-Path $Root '_ext'
 $PyExe   = Join-Path $Ext 'python\python.exe'
 $Server  = Join-Path $Ext 'server\swgtcg_server.py'
 $SrvCwd  = Join-Path $Ext 'server'
+$Db      = Join-Path $Ext 'server\swgtcg.db'
 $HostsFile = Join-Path $env:WINDIR 'System32\drivers\etc\hosts'
 $HostNames = @('sdkccg-02-04.station.sony.com','sdkccg-02-11.station.sony.com')
 
@@ -76,10 +77,24 @@ function Start-Server {
     else { Write-Host "WARNING: login server did not open its port -- see _ext\server\server.err.log" -ForegroundColor Yellow }
 }
 
+# Remove SQLite sidecar journals (-wal/-shm/-journal). The server is force-killed on Stop,
+# so a leftover journal from a prior run must never survive next to the account DB: with the
+# DB swapped by the Collection Manager, a stale -wal would replay onto the new file and either
+# revert edits or corrupt it. Safe to delete because the server uses rollback (DELETE) journal
+# mode -- every committed write already lives in swgtcg.db itself, not in a sidecar.
+function Remove-DbSidecars {
+    foreach ($sfx in @('-wal', '-shm', '-journal')) {
+        $s = $Db + $sfx
+        if (Test-Path $s) { Remove-Item $s -Force -ErrorAction SilentlyContinue }
+    }
+}
+
 function Stop-Server {
     $ours = Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
             Where-Object { $_.ExecutablePath -eq (Resolve-Path $PyExe).Path }
     foreach ($p in $ours) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }
+    if ($ours) { Start-Sleep -Milliseconds 300 }   # let the OS release the file handle before we clean up
+    Remove-DbSidecars
     if ($ours) { Write-Host "Login server stopped." -ForegroundColor Green } else { Write-Host "Login server was not running." -ForegroundColor DarkGray }
 }
 
@@ -117,7 +132,9 @@ function Apply-EditedDb {
     $dl = Get-ChildItem (Join-Path $env:USERPROFILE 'Downloads') -Filter 'swgtcg*.db' -ErrorAction SilentlyContinue |
           Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if (-not $dl) { Write-Host "No edited swgtcg*.db found in your Downloads folder -- Save it from the manager first." -ForegroundColor Yellow; return }
-    Copy-Item $dl.FullName (Join-Path $Ext 'server\swgtcg.db') -Force
+    Remove-DbSidecars                       # drop any stale journal BEFORE swapping in the new image...
+    Copy-Item $dl.FullName $Db -Force
+    Remove-DbSidecars                       # ...and after, so nothing from the old db replays onto it
     Write-Host "Applied '$($dl.Name)' (newest download) -> _ext\server\swgtcg.db. Choose [1] Play to use it." -ForegroundColor Green
 }
 
@@ -135,6 +152,7 @@ function Backup-Saves {
 }
 
 function Restore-Saves {
+    Stop-Server   # release the DB before overwriting it
     if (-not (Test-Path $Backups)) { Write-Host "No Backups folder yet." -ForegroundColor Yellow; return }
     $zips = @(Get-ChildItem $Backups -Filter *.zip | Sort-Object LastWriteTime -Descending)
     if ($zips.Count -eq 0) { Write-Host "No backups found." -ForegroundColor Yellow; return }
@@ -143,7 +161,7 @@ function Restore-Saves {
     if ($sel -match '^\d+$' -and [int]$sel -lt $zips.Count) {
         $tmp = Join-Path $env:TEMP ("swgrestore_" + [guid]::NewGuid().ToString('N'))
         Expand-Archive -Path $zips[[int]$sel].FullName -DestinationPath $tmp -Force
-        if (Test-Path (Join-Path $tmp 'swgtcg.db')) { Copy-Item (Join-Path $tmp 'swgtcg.db') (Join-Path $Ext 'server\swgtcg.db') -Force }
+        if (Test-Path (Join-Path $tmp 'swgtcg.db')) { Remove-DbSidecars; Copy-Item (Join-Path $tmp 'swgtcg.db') $Db -Force; Remove-DbSidecars }
         foreach ($d in @('collections','decks')) { if (Test-Path (Join-Path $tmp $d)) { Copy-Item (Join-Path $tmp $d) (Join-Path $Game 'data') -Recurse -Force } }
         Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
         Write-Host "Restored $($zips[[int]$sel].Name)" -ForegroundColor Green

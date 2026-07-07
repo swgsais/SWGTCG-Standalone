@@ -189,8 +189,15 @@ def connect(path=None):
     conn = sqlite3.connect(path or config.DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA busy_timeout = 5000")   # the server + launcher share the file
-    conn.execute("PRAGMA journal_mode = WAL")    # concurrent readers + one writer
+    conn.execute("PRAGMA busy_timeout = 5000")
+    # Rollback (DELETE) journal, NOT WAL. This is a single local writer; WAL buys nothing
+    # here and actively breaks the launcher's edit flow: the server is force-killed on Stop
+    # (no clean checkpoint), so committed writes would be stranded in swgtcg.db-wal, which the
+    # browser Collection Manager (sql.js) cannot read -- it opens only the main .db file. That
+    # split caused edits to vanish and, when a swapped-in db had a different page layout, the
+    # stale -wal replayed onto it and corrupted the file. DELETE mode folds every commit into
+    # the main .db immediately, so the manager always sees current data and a kill strands nothing.
+    conn.execute("PRAGMA journal_mode = DELETE")
     return conn
 
 
