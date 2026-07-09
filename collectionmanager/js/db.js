@@ -113,10 +113,68 @@
 
   function exportBytes() { return db.export(); }
 
+  /* ---- campaign / scenario progress ----
+   * The server persists each scenario progress frame in campaign_progress and replays it
+   * at login. Here we let the user view + reset it, and (experimentally) grant a scenario
+   * by writing the raw progress frame the app builds. The table may be absent in an older
+   * db (created by the server on first boot) -- guard reads, auto-create before a write. */
+  function tableExists(name) {
+    return all("SELECT name FROM sqlite_master WHERE type='table' AND name=?", [name]).length > 0;
+  }
+  function ensureCampaignTable() {
+    if (!tableExists('campaign_progress'))
+      run("CREATE TABLE IF NOT EXISTS campaign_progress (" +
+          "account_id INTEGER NOT NULL, cid INTEGER NOT NULL, item_key TEXT NOT NULL, " +
+          "payload BLOB NOT NULL, updated_at TEXT NOT NULL DEFAULT (datetime('now')), " +
+          "PRIMARY KEY(account_id, cid, item_key))");
+  }
+  function campaignProgress(acct) {
+    if (!tableExists('campaign_progress')) return [];
+    return all("SELECT cid, item_key, updated_at FROM campaign_progress WHERE account_id=? ORDER BY cid, item_key", [acct]);
+  }
+  /* payload = Uint8Array (the raw command body). Latest-wins per (acct,cid,item_key). */
+  function grantScenario(acct, cid, itemKey, payload) {
+    ensureCampaignTable();
+    run("INSERT INTO campaign_progress(account_id,cid,item_key,payload,updated_at) " +
+        "VALUES(?,?,?,?, datetime('now')) " +
+        "ON CONFLICT(account_id,cid,item_key) DO UPDATE SET payload=excluded.payload, updated_at=excluded.updated_at",
+        [acct, cid, itemKey, payload]);
+  }
+  function resetCampaign(acct) { if (tableExists('campaign_progress')) run("DELETE FROM campaign_progress WHERE account_id=?", [acct]); }
+  function resetAllCampaign() { if (tableExists('campaign_progress')) run("DELETE FROM campaign_progress"); }
+
+  /* ---- structured scenario completion (the state the server turns into account property 0x1054) ---- */
+  function ensureCompletionTable() {
+    if (!tableExists('scenario_completion'))
+      run("CREATE TABLE IF NOT EXISTS scenario_completion (" +
+          "account_id INTEGER NOT NULL, node_id INTEGER NOT NULL, archetype_id INTEGER NOT NULL, " +
+          "difficulty INTEGER NOT NULL, updated_at TEXT NOT NULL DEFAULT (datetime('now')), " +
+          "PRIMARY KEY(account_id, node_id, archetype_id, difficulty))");
+  }
+  function scenarioCompletion(acct) {
+    if (!tableExists('scenario_completion')) return [];
+    return all("SELECT node_id, archetype_id, difficulty FROM scenario_completion WHERE account_id=? " +
+               "ORDER BY node_id, archetype_id, difficulty", [acct]);
+  }
+  /* learned scenario-string -> nodeId map (populated server-side by playing a scenario once). */
+  function scenarioNodemap() {
+    if (!tableExists('scenario_nodemap')) return {};
+    var m = {}; all("SELECT scenario_id, node_id FROM scenario_nodemap").forEach(function (r) { m[r.scenario_id] = r.node_id; });
+    return m;
+  }
+  function grantCompletion(acct, nodeId, archId, difficulty) {
+    ensureCompletionTable();
+    run("INSERT OR REPLACE INTO scenario_completion(account_id,node_id,archetype_id,difficulty,updated_at) " +
+        "VALUES(?,?,?,?, datetime('now'))", [acct, nodeId, archId, difficulty]);
+  }
+  function clearCompletion(acct) { if (tableExists('scenario_completion')) run("DELETE FROM scenario_completion WHERE account_id=?", [acct]); }
+
   global.DB = {
     open: open, isOpen: isOpen, accounts: accounts,
     collection: collection, collectionTotal: collectionTotal, setOwned: setOwned, grantAll: grantAll, clearCollection: clearCollection,
     decks: decks, deck: deck, saveDeck: saveDeck, deleteDeck: deleteDeck,
+    campaignProgress: campaignProgress, grantScenario: grantScenario, resetCampaign: resetCampaign, resetAllCampaign: resetAllCampaign,
+    scenarioCompletion: scenarioCompletion, scenarioNodemap: scenarioNodemap, grantCompletion: grantCompletion, clearCompletion: clearCompletion,
     exportBytes: exportBytes
   };
 })(window);

@@ -32,12 +32,13 @@ $HostsFile = Join-Path $env:WINDIR 'System32\drivers\etc\hosts'
 $HostNames = @('sdkccg-02-04.station.sony.com','sdkccg-02-11.station.sony.com')
 
 # Auto-login args: --host resolves (via hosts) to 127.0.0.1 = our local server.
-# sessionID/challenge are dummy (the local server does not validate them).
-# characterID=1 selects the built-in local account (tester1, with the "Starter 111" deck).
+# The server binds the fixed sessionID below to the single StandAloneUser account (it
+# refreshes that session on every boot), so login always lands on StandAloneUser -- which
+# owns all four starter decks (Imperial / Jedi / Rebel / Sith). characterID is cosmetic here.
 $GameArgs = @(
     '--realm=production',
     '--host=sdkccg-02-04.station.sony.com',
-    '--username=tester',
+    '--username=StandAloneUser',
     '--sessionID=deadbeefdeadbeef',
     '--challenge=cafebabecafebabe',
     '--characterID=1'
@@ -174,7 +175,7 @@ try {
         $hostsOk = Test-Hosts
         Write-Host ""
         Write-Host "======================================================" -ForegroundColor DarkCyan
-        Write-Host "   Star Wars Galaxies TCG -- Standalone (offline)"      -ForegroundColor White
+        Write-Host "   Star Wars Galaxies TCG -- Standalone (offline)  V2"  -ForegroundColor White
         Write-Host "======================================================" -ForegroundColor DarkCyan
         Write-Host ("   hosts entries: " + $(if ($hostsOk) { "OK" } else { "MISSING (run 'Add Hosts Entries.cmd')" })) -ForegroundColor $(if ($hostsOk) { 'Green' } else { 'Yellow' })
         Write-Host ("   login server : " + $(if (Test-ServerUp) { "running" } else { "stopped" })) -ForegroundColor DarkGray

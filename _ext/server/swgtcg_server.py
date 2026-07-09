@@ -114,6 +114,7 @@ CLIENT_HDR = 12
 KEEPALIVE    = os.environ.get("SWGTCG_KEEPALIVE", "1") != "0"
 KEEPALIVE_IV = float(os.environ.get("SWGTCG_KEEPALIVE_IV", "10"))   # seconds; must stay < 60
 LAST_PING    = {}   # acct -> last client-sent 112 body (header-stripped, ready to re-frame)
+LAST_SCENARIO_STR = {}   # acct -> last scenario id string from a 487 (to correlate with the 415's nodeId)
 
 def parse_client_cmd(payload):
     """Return (classid, body_after_header) for a client->server frame, or (None, b'')."""
@@ -125,6 +126,103 @@ def parse_client_cmd(payload):
     except Exception:
         return None, body
     return cid, body
+
+import re as _re
+_CAMPAIGN_ID_LO, _CAMPAIGN_ID_HI = 0x15000, 0x16000
+
+def _campaign_key(body):
+    """Stable latest-wins key for a campaign/scenario progress frame (cid 415/487).
+    Scenario reports (487) carry the scenario id as a length-prefixed ASCII string
+    (e.g. 'COTF_Scenario06') -> key on that. SetCampaignStatus(415) is all ints ->
+    key on the campaign id (the int in the 0x15xxx campaign-id range). Fallback
+    'default' still means latest-wins per cid -- it never accumulates garbage rows."""
+    runs = _re.findall(rb"[A-Za-z0-9_-]{4,}", body)  # '-' so 'Tutorial01_..-main' extracts whole
+    if runs:
+        return max(runs, key=len).decode("latin1")
+    i = 0
+    while i < len(body):
+        try:
+            v, i = dec_int(body, i)
+        except Exception:
+            break
+        if _CAMPAIGN_ID_LO <= v <= _CAMPAIGN_ID_HI:
+            return "campaign_%d" % v
+    return "default"
+
+
+# --- campaign completion: parse the 415 report + build account property 0x1054 ---------------------
+# The campaign tree reads account property 0x1054 (an IntValueMap node->{archetype->IntegerList[diff]})
+# from the GetAccountInfo(297) reply. On scenario completion the client sends SetCampaignStatus(415)
+# carrying the nodeId (0x157xx), an archetype id (0x13886..9) and a difficulty (1/2/3). We classify the
+# 415's ints by range (robust to the exact field/version layout) and store them; at login we rebuild
+# 0x1054 from the stored completions. (Full RE: workflow decode of CID_415/454 + the 4 tree readers.)
+_NODE_LO, _NODE_HI = 0x157D0, 0x15830     # campaign/scenario node ids (tutorials 0x157D2)
+_CAMPAIGN_PARAM_KEY = 0x13888             # == hash("archetype"); the CONSTANT middle level in the 0x1054
+                                          # nesting (live-captured from the exe writer FUN_006409d0).
+
+def _parse_415(body):
+    """-> (node_id, archetype, difficulty). 415 fields (positional, after the AccountCommand base int):
+    [node, difficulty, archetype, paramKeyHash(0x13888), ""]. archetype is a small value (1/2), NOT the
+    0x13888 hash (that was a mis-read). node/arch None if not present."""
+    ints, i = [], 0
+    while i < len(body):
+        try:
+            v, i = dec_int(body, i)
+        except Exception:
+            break
+        ints.append(v)
+    node = next((v for v in ints if _NODE_LO <= v <= _NODE_HI), None)
+    arch = None
+    diff = 1
+    if node is not None:
+        idx = ints.index(node)
+        if idx + 1 < len(ints) and ints[idx + 1] in (1, 2, 3):
+            diff = ints[idx + 1]      # difficultyValue = field right after the nodeId
+        if idx + 2 < len(ints):
+            arch = ints[idx + 2]      # archetype = the field after difficulty (1/2), not the 0x13888 hash
+    return node, arch, diff
+
+def _value_integerlist(ints):
+    """ValueData IntegerList (mTypeID 6): classid22, ver1, mTypeID6, ownRef1, count, ints."""
+    return (enc_int(22) + enc_int(1) + enc_int(6) + enc_int(1)
+            + enc_int(len(ints)) + b"".join(enc_int(v) for v in ints))
+
+def _value_intvaluemap(items):
+    """ValueData IntValueMap (mTypeID 0xE): classid22, ver1, mTypeID0xE, ownRef1, count, then
+    count*(enc_int(key) + <nested ValueData bytes>). items = list of (int_key, value_bytes)."""
+    body = enc_int(len(items))
+    for k, v in items:
+        body += enc_int(k) + v
+    return enc_int(22) + enc_int(1) + enc_int(0xE) + enc_int(1) + body
+
+def _value_int2(v):
+    """ValueData scalar int, mTypeID 2 (the type the unlock reader FUN_00882e50/FUN_005d81a0 expects
+    for a per-scenario completion property): classid22, ver1, mTypeID2, ownRef1, value."""
+    return enc_int(22) + enc_int(1) + enc_int(2) + enc_int(1) + enc_int(v)
+
+def build_node_props(comp):
+    """The REAL persistence the standalone's tree reads for unlock: a flat top-level account property
+    keyed by each completed scenario's node id, value = a type-2 int (live-RE'd from FUN_00882e50 ->
+    account.getProperty(node) -> mTypeID==2). Returns a list of (node_key, value_bytes) property entries.
+    Value = the max difficulty cleared for that node (1 easy / 2 med / 3 hard)."""
+    out = []
+    for node, archs in comp.items():
+        maxdiff = max((d for diffs in archs.values() for d in diffs), default=1)
+        out.append((node, _value_int2(maxdiff)))
+    return out
+
+def build_prop_0x1054(comp):
+    """comp = {node_id: {archetype: [difficulties]}} -> the property entry bytes for the 114 PropertySet.
+    EXE structure (live-captured from the writer FUN_006409d0's create path):
+        0x1054 (IntValueMap) [node] -> IntValueMap [0x13888] -> IntValueMap [archetype] -> IntegerList[difficulties]
+    i.e. there is a CONSTANT 0x13888 ("archetype" param hash) map level between the node and the archetype."""
+    outer = []
+    for node, archs in comp.items():
+        arch_map = [(arch, _value_integerlist(sorted(set(diffs)))) for arch, diffs in archs.items()]
+        mid = [(_CAMPAIGN_PARAM_KEY, _value_intvaluemap(arch_map))]
+        outer.append((node, _value_intvaluemap(mid)))
+    return enc_int(0x1054) + _value_intvaluemap(outer)
+
 
 def dispatch(conn, n, payload, acct=None, dbc=None):
     """Match CONTROLLER (replaces the broken 'relay everything' model). The server is the
@@ -426,6 +524,40 @@ def dispatch(conn, n, payload, acct=None, dbc=None):
         elif req_disp == 2:                # Casual button -> back to the casual category (gid 100)
             conn.sendall(build_changelobbydisplay(CASUAL_CAT))
             log(16783, n, "-> answered Casual button: ChangeLobbyDisplay(291, display=%d)" % CASUAL_CAT)
+        return
+
+    if cid == 415:                         # ★ SCENARIO COMPLETION report (AccountCommand_SetCampaignStatus).
+        # Carries (nodeId 0x157xx, archetypeId 0x1388x, difficulty 1/2/3). We store it STRUCTURED and rebuild
+        # account property 0x1054 in the 297 login reply -- the only thing that actually persists the campaign
+        # tree (a replayed 415 is a client-side no-op: its apply handler is `return 1`). See _parse_415.
+        if dbc is not None:
+            try:
+                node, arch, diff = _parse_415(body)
+                dbmod.save_campaign_frame(dbc, acct, 415, "node_%s" % node, body)   # keep raw for debugging
+                if node is not None and arch is not None:
+                    dbmod.record_scenario_completion(dbc, acct, node, arch, diff)
+                    sname = LAST_SCENARIO_STR.get(acct)                             # learn string<->node pairing
+                    if sname:
+                        dbmod.learn_scenario_node(dbc, sname, node, arch)
+                    log(16783, n, "-> SAVED completion acct=%s node=0x%x arch=0x%x diff=%s name=%s"
+                        % (acct, node, arch, diff, sname))
+                else:
+                    log(16783, n, "-> 415 acct=%s UNPARSED (node=%s arch=%s) raw=%s"
+                        % (acct, node, arch, hexdump(body)))
+            except Exception as e:
+                log(16783, n, "-> 415 completion save FAILED acct=%s: %s" % (acct, e))
+        return
+
+    if cid == 487:                         # scenario report -- carries the scenario id STRING. Remember it so the
+        # next 415 can be paired to its nodeId (learns scenario_nodemap), and archive the raw frame.
+        if dbc is not None:
+            try:
+                key = _campaign_key(body)
+                LAST_SCENARIO_STR[acct] = key
+                dbmod.save_campaign_frame(dbc, acct, 487, key, body)
+                log(16783, n, "-> scenario report acct=%s name=%s (remembered for nodemap)" % (acct, key))
+            except Exception as e:
+                log(16783, n, "-> 487 save FAILED acct=%s: %s" % (acct, e))
         return
 
     # Everything else (buddies/ignore/tournament/etc.): DROP. Never relay raw client state to the peer.
@@ -1875,8 +2007,29 @@ def handle(conn, addr, port):
                                 + enc_int(len(strs)) + b"".join(enc_str(s) for s in strs))
                     _ENTITLEMENTS = dbmod.load_entitlements(dbc, ACCT)  # per-account, from the DB
                     # NB: "Staff"/"WorldsApart" (admin/special modes) are granted explicitly, not by default.
+                    # Property 1: entitlements @ 0xfc5. Property 2 (when the account has scenario completions):
+                    # the campaign-tree map @ 0x1054. BOTH must ride on THIS 114 propset -- FUN_10192ba0 copies
+                    # it wholesale into Account+0x34, the container the campaign tree (FUN_10068cd0) reads. The
+                    # 297 GetAccountInfo never touches Account+0x34, so 0x1054 there is inert (that was the bug).
+                    _iprops = enc_int(0xfc5) + _ent_stringlist(_ENTITLEMENTS)
+                    _inp = 1
+                    if not os.environ.get("SWGTCG_NO_CAMPAIGN_REPLAY"):
+                        try:
+                            _icomp = dbmod.load_scenario_completion(dbc, ACCT)
+                        except Exception:
+                            _icomp = {}
+                        if _icomp:
+                            # (a) flat per-node type-2 property = the UNLOCK state the tree reader
+                            # (FUN_00882e50 -> account.getProperty(node), mTypeID==2) actually checks.
+                            for _nkey, _nval in build_node_props(_icomp):
+                                _iprops += enc_int(_nkey) + _nval
+                                _inp += 1
+                            # (b) 0x1054 nested map = the completion detail (difficulties/archetypes).
+                            _iprops += build_prop_0x1054(_icomp)
+                            _inp += 1
+                            log(port, n, "-> campaign on IntroduceAccount(114): %d node(s) (flat unlock props + 0x1054)" % len(_icomp))
                     ent_propset = (enc_int(0) + enc_int(23) + enc_int(1)          # PRESENT PropertySet(23) v1
-                                   + enc_int(1) + enc_int(0xfc5) + _ent_stringlist(_ENTITLEMENTS))
+                                   + enc_int(_inp) + _iprops)
                     # base id (AccountCommand+0x4, read by FUN_10009fc0) MUST equal ACCT: the
                     # execute (FUN_1000fe40) looks up/creates the account by THIS id and merges
                     # the PropertySet into it; login keys the local account by ACCT, so a mismatch
@@ -1983,8 +2136,10 @@ def handle(conn, addr, port):
                             return (enc_int(22) + enc_int(1) + enc_int(7) + enc_int(1)
                                     + enc_int(len(strs)) + b"".join(enc_str(s) for s in strs))
                         _ents = dbmod.load_entitlements(dbc, ACCT)
+                        # Entitlements StringList @ 0xfc5. (Campaign 0x1054 rides the 114 IntroduceAccount, not
+                        # here -- 297 never writes Account+0x34, so a property here can't reach the campaign tree.)
                         sub = (enc_int(0) + enc_int(23) + enc_int(1)        # PRESENT PropertySet(23) v1
-                               + enc_int(1) + enc_int(0xfc5) + _value_stringlist(_ents))  # 1 property: 0xfc5 -> ents
+                               + enc_int(1) + enc_int(0xfc5) + _value_stringlist(_ents))
                         acctinfo = frame(env(297, 2) + enc_int(ACCT) + sub)
                         conn.sendall(acctinfo)
                         log(port, n, "-> AccountCommand_GetAccountInfo(297) acct=%d (%d B): %s" % (ACCT, len(acctinfo), hexdump(acctinfo)))
@@ -2015,6 +2170,8 @@ def handle(conn, addr, port):
                         addgroups = frame(env(94, 3) + enc_int(0) + enc_int(NGROUPS) + groups)
                         conn.sendall(addgroups)
                         log(port, n, "-> LobbyCommand_AddGroups(94) %d groups (%d B): %s" % (NGROUPS, len(addgroups), hexdump(addgroups)))
+                    # NOTE: campaign progress is restored via property 0x1054 inside the 297 reply above
+                    # (the real mechanism), NOT by replaying 415/487 frames -- those are client-side no-ops.
                     # ---- TOURNAMENT LOBBY (gated + DEFERRED; RE agent ad4dbec9 + create-gate RE) ----
                     # The display=5 tournament screen needs a gid=5 (==display id) type-5 group + SetTournament
                     # (299)/UpdateTournament(293) so FUN_10153800(5) resolves and the models populate. BUT that
@@ -2480,6 +2637,10 @@ if __name__ == "__main__":
     _c = dbmod.connect(); dbmod.init_db(_c)
     if _c.execute("SELECT COUNT(*) FROM card_catalog").fetchone()[0] == 0:
         print("card_catalog seeded: %d cards" % dbmod.rebuild_card_catalog(_c))
+    # Single-player standalone: guarantee the one StandAloneUser account + a fresh auto-login
+    # session every boot (self-heals an expired/missing token or a swapped-in db).
+    _sa = dbmod.ensure_standalone_account(_c)
+    print("standalone account ready: id=%s (%s)" % (_sa, dbmod.STANDALONE_USERNAME))
     print("DB ready: %s (%d accounts)" % (config.DB_PATH,
           _c.execute("SELECT COUNT(*) FROM accounts").fetchone()[0]))
     _c.close()

@@ -15,3 +15,11 @@
 __pycache__/
 *.pyc
 *.pyo
+
+# RE / debug capture tooling (not shipped to players)
+Dump Campaign Keys.cmd
+Dump Write Key.cmd
+_ext/server/probe_*.cdb
+_ext/server/*.log
+_ext/server/campaign_keys.log
+_ext/server/write_key.log

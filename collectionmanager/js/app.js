@@ -99,7 +99,7 @@
     state.colMap = DB.collection(acct);
     refreshDeckList();
     state.deck = newDeck();
-    renderCollection(); renderDeck();
+    renderCollection(); renderDeck(); renderScenarios();
     log('Account ' + acct + ': ' + DB.collectionTotal(acct) + ' cards, ' + DB.decks(acct).length + ' decks.', 'ok');
   }
 
@@ -254,6 +254,94 @@
 
   function typeBadge(c) { var t = c.type || '?'; var b = el('span', 'badge t-' + t.toLowerCase(), t.slice(0, 2).toUpperCase()); b.title = t; return b; }
 
+  // ---- scenarios / campaign progress -------------------------------------
+  // The real scenario ids (from the game's own data\campaign.dat) + tutorials, grouped by campaign.
+  var SCENARIOS = (function () {
+    var tut = ['Tutorial01_GettingStarted-main', 'Tutorial02_Avatars-main', 'Tutorial03_Quests-main',
+      'Tutorial04_Units-main', 'Tutorial05_Abilities-main', 'Tutorial06_Items-main', 'Tutorial07_Tactics-main',
+      'Tutorial08_UnitCombat-main', 'Tutorial09_AvatarCombat-main', 'Tutorial10_Summary-main', 'Tutorial11_AIFight-main'];
+    var cotf = []; for (var i = 1; i <= 10; i++) cotf.push('COTF_Scenario' + (i < 10 ? '0' + i : '' + i));
+    function ld(p) { var a = []; for (var l = 1; l <= 5; l++) a.push(p + '_ScenarioL' + l); for (var d = 1; d <= 5; d++) a.push(p + '_ScenarioD' + d); return a; }
+    return [{ label: 'Tutorials', ids: tut }, { label: 'Champions of the Force', ids: cotf },
+            { label: 'Agents of Deception', ids: ld('AOD') }, { label: 'Galactic Hunters', ids: ld('GH') },
+            { label: 'Shadow Syndicate (SOC)', ids: ld('SOC') }];
+  })();
+
+  // Archetype = a small index (1/2), the value the EXE actually stores (live-RE'd; the 0x13886-9 ids
+  // were a mis-read). Unlock keys off the node property regardless of archetype; this just fills the
+  // per-scenario detail. Grant both archetypes at all difficulties = fully complete.
+  var DIFFS = [1, 2, 3];                       // 1 easy, 2 medium, 3 hard
+  var DIFF_NAME = { 1: 'Easy', 2: 'Med', 3: 'Hard' };
+  function scnArchetypes(id) { return /^Tutorial/i.test(id) ? [1] : [1, 2]; }
+
+  function renderScenarios() {
+    var meta = $('scnMeta'), prog = $('scnProgress'), grant = $('scnGrantList');
+    if (!DB.isOpen()) { meta.textContent = 'No database open. Click "Open Account DB".'; prog.innerHTML = ''; grant.innerHTML = ''; return; }
+    var comp = DB.scenarioCompletion(state.acct);   // [{node_id, archetype_id, difficulty}]
+    var nodemap = DB.scenarioNodemap();             // {scenarioId: node_id}  (learned by playing)
+    var nodeToName = {}; Object.keys(nodemap).forEach(function (s) { nodeToName[nodemap[s]] = s; });
+    var byNode = {}; comp.forEach(function (r) { (byNode[r.node_id] = byNode[r.node_id] || []).push(r); });
+    meta.innerHTML = 'Account <b>' + esc(acctName()) + '</b> &nbsp; ' + comp.length +
+      ' completion record(s), ' + Object.keys(nodemap).length + ' scenario(s) mapped';
+    prog.innerHTML = '';
+    if (!comp.length) prog.appendChild(el('div', 'more', 'No scenario progress saved yet. Play a scenario, or grant a mapped one below.'));
+    Object.keys(byNode).forEach(function (node) {
+      var diffs = {}, archs = {};
+      byNode[node].forEach(function (r) { diffs[r.difficulty] = 1; archs[r.archetype_id] = 1; });
+      var row = el('div', 'row');
+      row.appendChild(el('span', 'badge t-quest', 'SC'));
+      row.appendChild(el('span', 'name', nodeToName[node] || ('node 0x' + (+node).toString(16))));
+      row.appendChild(el('span', 'tag', Object.keys(diffs).map(function (d) { return DIFF_NAME[d]; }).join('/') + ' ×' + Object.keys(archs).length + ' arch'));
+      prog.appendChild(row);
+    });
+    grant.innerHTML = '';
+    SCENARIOS.forEach(function (grp) {
+      var h = el('div', 'more', grp.label); h.style.fontWeight = '700'; grant.appendChild(h);
+      grp.ids.forEach(function (id) {
+        var node = nodemap[id];
+        var row = el('div', 'row');
+        var cb = el('input', 'scnchk'); cb.type = 'checkbox'; cb.value = id; cb.disabled = !node;
+        var lbl = el('label', 'name', id); lbl.style.cursor = node ? 'pointer' : 'default';
+        if (!node) lbl.style.opacity = '0.55';
+        if (node) lbl.onclick = function () { cb.checked = !cb.checked; };
+        row.appendChild(cb); row.appendChild(lbl);
+        if (node && byNode[node]) row.appendChild(el('span', 'tag own', 'done'));
+        else if (!node) row.appendChild(el('span', 'tag', 'play once to enable'));
+        grant.appendChild(row);
+      });
+    });
+  }
+  function scnSelected() { return Array.prototype.map.call(document.querySelectorAll('.scnchk:checked'), function (c) { return c.value; }); }
+  function scnSetAll(v) { Array.prototype.forEach.call(document.querySelectorAll('.scnchk'), function (c) { if (!c.disabled) c.checked = v; }); }
+  function grantScenarios() {
+    if (!DB.isOpen()) { log('Open a database first.', 'warn'); return; }
+    var ids = scnSelected();
+    if (!ids.length) { log('Tick mapped scenarios to grant first.', 'warn'); return; }
+    var nodemap = DB.scenarioNodemap(), granted = 0, skipped = 0;
+    ids.forEach(function (id) {
+      var node = nodemap[id];
+      if (!node) { skipped++; return; }
+      scnArchetypes(id).forEach(function (a) { DIFFS.forEach(function (d) { DB.grantCompletion(state.acct, node, a, d); }); });
+      granted++;
+    });
+    markDirty();
+    log('Granted ' + granted + ' scenario(s) at all difficulties' + (skipped ? ' (' + skipped + ' skipped, not yet mapped)' : '') +
+        ' to ' + acctName() + '. Save to game + relaunch.', 'ok');
+    renderScenarios();
+  }
+  function resetScenariosAcct() {
+    if (!DB.isOpen()) { log('Open a database first.', 'warn'); return; }
+    DB.clearCompletion(state.acct); markDirty();
+    log('Reset scenario progress for ' + acctName() + '. Save to game + relaunch to start fresh.', 'ok');
+    renderScenarios();
+  }
+  function resetScenariosAll() {
+    if (!DB.isOpen()) { log('Open a database first.', 'warn'); return; }
+    DB.accounts().forEach(function (a) { DB.clearCompletion(a.id); }); markDirty();
+    log('Reset scenario progress for ALL accounts. Save to game + relaunch.', 'ok');
+    renderScenarios();
+  }
+
   function init() {
     ['Avatar', 'Unit', 'Ability', 'Item', 'Tactic', 'Quest'].forEach(function (t) { var o = el('option', null, t); o.value = t; $('colType').appendChild(o); });
     AVATARS.forEach(function (a) { var o = el('option', null, a.name + '  (' + a.id + ')'); o.value = String(a.id); $('deckAvatar').appendChild(o); });
@@ -286,6 +374,12 @@
     $('deckNew').onclick = function () { state.deck = newDeck(); renderDeck(); log('New deck.', 'ok'); };
     $('deckLoad').onclick = function () { loadDeck($('deckFile').value); };
     $('deckDelete').onclick = deleteDeck;
+
+    $('scnGrant').onclick = grantScenarios;
+    $('scnSelAll').onclick = function () { scnSetAll(true); };
+    $('scnSelNone').onclick = function () { scnSetAll(false); };
+    $('scnResetAcct').onclick = resetScenariosAcct;
+    $('scnResetAll').onclick = resetScenariosAll;
 
     window.addEventListener('beforeunload', function (e) { if (state.dirty) { e.preventDefault(); e.returnValue = ''; } });
 

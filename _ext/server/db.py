@@ -179,6 +179,45 @@ CREATE TABLE IF NOT EXISTS tournament_matches (
     created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
     UNIQUE (tournament_id, round, table_no)
 );
+
+-- Single-player CAMPAIGN / SCENARIO progress. The client is authoritative: on each
+-- scenario play it emits AccountCommand_SetCampaignStatus(415) (per-campaign status)
+-- and cid 487 (a per-scenario report carrying the scenario id string). The stock server
+-- dropped both, so progress reset to a blank campaign tree on every relaunch. We persist
+-- the RAW command body per (account, cid, item_key) latest-wins, and replay it verbatim
+-- at login so completed scenarios + unlocked rewards show again.
+CREATE TABLE IF NOT EXISTS campaign_progress (
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    cid        INTEGER NOT NULL,               -- 415 = SetCampaignStatus, 487 = scenario report
+    item_key   TEXT    NOT NULL,               -- campaign id (415) or scenario id string (487)
+    payload    BLOB    NOT NULL,               -- the raw command body (kept for reference/debug)
+    updated_at TEXT    NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (account_id, cid, item_key)
+);
+
+-- Structured scenario completion. This is the REAL save state: on scenario completion the client
+-- sends AccountCommand_SetCampaignStatus(415) carrying (nodeId, archetypeId, difficulty). We store
+-- one row per (node, archetype, difficulty) cleared, and rebuild account property 0x1054 (an
+-- IntValueMap: node -> {archetype -> IntegerList[difficulty]}) inside the GetAccountInfo(297) login
+-- reply -- which is what actually drives the campaign tree's completion/unlock state.
+CREATE TABLE IF NOT EXISTS scenario_completion (
+    account_id  INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    node_id     INTEGER NOT NULL,              -- 0x157xx campaign/scenario node id (from the 415)
+    archetype_id INTEGER NOT NULL,             -- 0x13886 rebel/0x13887 sith/0x13888 jedi/0x13889 imperial
+    difficulty  INTEGER NOT NULL,              -- 1 easy, 2 medium, 3 hard
+    updated_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (account_id, node_id, archetype_id, difficulty)
+);
+
+-- Learned scenario-string -> numeric nodeId map (the node ids are load-time ForcedIDs, not stored in
+-- any static table). Populated by correlating a 487 scenario-report (carries the string) with the
+-- 415 (carries the node id) from the same session. Lets the manager's Grant target scenarios by name.
+CREATE TABLE IF NOT EXISTS scenario_nodemap (
+    scenario_id TEXT    PRIMARY KEY,           -- e.g. 'COTF_Scenario06'
+    node_id     INTEGER NOT NULL,
+    archetype_id INTEGER,                       -- an archetype seen for it (informational)
+    updated_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 
@@ -255,6 +294,75 @@ def verify_login(conn, username, password):
 
 def load_account(conn, account_id):
     return conn.execute("SELECT * FROM accounts WHERE id = ?", (account_id,)).fetchone()
+
+
+# ==========================================================================
+# campaign / scenario progress (raw-frame store + verbatim replay)
+# ==========================================================================
+def save_campaign_frame(conn, account_id, cid, item_key, payload):
+    """Upsert one campaign/scenario progress frame (latest-wins per key). `payload` is
+    the raw command body the client sent; it is stored as-is and re-sent verbatim at login."""
+    conn.execute(
+        "INSERT INTO campaign_progress(account_id, cid, item_key, payload, updated_at) "
+        "VALUES (?,?,?,?, datetime('now')) "
+        "ON CONFLICT(account_id, cid, item_key) DO UPDATE SET "
+        "payload=excluded.payload, updated_at=excluded.updated_at",
+        (account_id, cid, item_key, sqlite3.Binary(payload)))
+    conn.commit()
+
+
+def load_campaign_frames(conn, account_id):
+    """All stored progress frames for an account, oldest-first per cid. Returns
+    [(cid, item_key, payload_bytes), ...] for verbatim replay in the login sequence."""
+    rows = conn.execute(
+        "SELECT cid, item_key, payload FROM campaign_progress "
+        "WHERE account_id=? ORDER BY cid, updated_at", (account_id,)).fetchall()
+    return [(r["cid"], r["item_key"], bytes(r["payload"])) for r in rows]
+
+
+# ---- structured scenario completion (drives account property 0x1054) ----
+def record_scenario_completion(conn, account_id, node_id, archetype_id, difficulty):
+    """Mark one (node, archetype, difficulty) cleared. Idempotent (PK)."""
+    conn.execute(
+        "INSERT OR REPLACE INTO scenario_completion(account_id, node_id, archetype_id, difficulty, updated_at) "
+        "VALUES (?,?,?,?, datetime('now'))", (account_id, node_id, archetype_id, difficulty))
+    conn.commit()
+
+
+def load_scenario_completion(conn, account_id):
+    """-> {node_id: {archetype_id: [difficulties...] }} for building property 0x1054."""
+    out = {}
+    for r in conn.execute("SELECT node_id, archetype_id, difficulty FROM scenario_completion "
+                          "WHERE account_id=? ORDER BY node_id, archetype_id, difficulty", (account_id,)):
+        out.setdefault(r["node_id"], {}).setdefault(r["archetype_id"], []).append(r["difficulty"])
+    return out
+
+
+def clear_scenario_completion(conn, account_id, node_id=None):
+    if node_id is None:
+        conn.execute("DELETE FROM scenario_completion WHERE account_id=?", (account_id,))
+    else:
+        conn.execute("DELETE FROM scenario_completion WHERE account_id=? AND node_id=?", (account_id, node_id))
+    conn.commit()
+
+
+def learn_scenario_node(conn, scenario_id, node_id, archetype_id=None):
+    """Record a scenario-string -> nodeId pairing (from correlating a 487 report with a 415)."""
+    conn.execute(
+        "INSERT INTO scenario_nodemap(scenario_id, node_id, archetype_id, updated_at) "
+        "VALUES (?,?,?, datetime('now')) ON CONFLICT(scenario_id) DO UPDATE SET "
+        "node_id=excluded.node_id, archetype_id=COALESCE(excluded.archetype_id, scenario_nodemap.archetype_id), "
+        "updated_at=excluded.updated_at", (scenario_id, node_id, archetype_id))
+    conn.commit()
+
+
+def scenario_node(conn, scenario_id):
+    r = conn.execute("SELECT node_id, archetype_id FROM scenario_nodemap WHERE scenario_id=?", (scenario_id,)).fetchone()
+    return (r["node_id"], r["archetype_id"]) if r else (None, None)
+
+
+def scenario_nodemap(conn):
+    return {r["scenario_id"]: r["node_id"] for r in conn.execute("SELECT scenario_id, node_id FROM scenario_nodemap")}
 
 
 def account_by_username(conn, username):
@@ -470,8 +578,87 @@ def seed_starter(conn, account_id, deck_id=None):
                 "INSERT INTO collections(account_id, catalog_id, qty) VALUES (?,?,?) "
                 "ON CONFLICT(account_id, catalog_id) DO UPDATE SET qty = qty + excluded.qty",
                 (account_id, cid, qty))
-    return create_deck(conn, account_id, "Starter %d" % deck_id,
+    dname = ("%s Starter" % STARTER_NAMES[deck_id]) if deck_id in STARTER_NAMES else ("Starter %d" % deck_id)
+    return create_deck(conn, account_id, dname,
                        sd["main"], sd["avatar"], sd["quests"], is_starter=1)
+
+
+# ==========================================================================
+# single-player standalone account (one fixed account + auto-login session)
+# ==========================================================================
+# The offline launcher auto-logs in with a FIXED dummy session id; login resolves purely
+# session -> account. So the whole standalone runs on ONE account, seeded with every starter
+# deck. These helpers guarantee that account + a long-lived session bound to it exist.
+STANDALONE_USERNAME   = "StandAloneUser"
+STANDALONE_SESSION_ID = "deadbeefdeadbeef"     # == launcher.ps1 --sessionID (what the client sends)
+
+def ensure_standalone_account(conn):
+    """Idempotent: guarantee the single standalone account exists with all four starter decks,
+    and refresh a long-lived fixed session bound to it so the launcher's auto-login always
+    resolves (the 30-min TTL would otherwise expire between launches). Safe every server boot."""
+    acct = account_by_username(conn, STANDALONE_USERNAME)
+    aid = acct["id"] if acct else create_account(conn, STANDALONE_USERNAME, "standalone")
+    # Seed all four starter decks if the account has none yet (fresh account, or a prior partial
+    # seed). Best-effort: standalone_cards + its data live in the RE repo, not the shipped bundle,
+    # so seeding is a no-op there (the decks are baked into the shipped db). Never raise -- a missing
+    # module must not break server boot.
+    if conn.execute("SELECT COUNT(*) FROM decks WHERE account_id=?", (aid,)).fetchone()[0] == 0:
+        try:
+            import standalone_cards
+            for did in sorted(standalone_cards.STARTER_DECKS):
+                try:
+                    seed_starter(conn, aid, did)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    if acct is None or conn.execute("SELECT last_deck_id FROM accounts WHERE id=?", (aid,)).fetchone()["last_deck_id"] is None:
+        row = conn.execute("SELECT id FROM decks WHERE account_id=? ORDER BY id LIMIT 1", (aid,)).fetchone()
+        if row:
+            conn.execute("UPDATE accounts SET last_deck_id=? WHERE id=?", (row["id"], aid))
+    # (re)issue the fixed login session, valid for years so relaunches never hit an expired token.
+    conn.execute("DELETE FROM sessions WHERE session_id=?", (STANDALONE_SESSION_ID,))
+    conn.execute(
+        "INSERT INTO sessions(session_id, account_id, username, challenge, character_id, expires_at) "
+        "VALUES (?,?,?,?,1, datetime('now','+3650 days'))",
+        (STANDALONE_SESSION_ID, aid, STANDALONE_USERNAME, "cafebabecafebabe"))
+    conn.commit()
+    return aid
+
+
+def reset_to_standalone(conn):
+    """Collapse to exactly one StandAloneUser with every starter deck. SAFE ORDER: build the new
+    account FIRST, verify it actually got its starter decks, and only THEN delete the others -- so a
+    failed/unavailable seed can never leave the db with zero usable accounts. accounts is the FK root,
+    so the delete cascades collections/decks/deck_cards/entitlements/sessions/player_stats/campaign_progress."""
+    aid = ensure_standalone_account(conn)
+    ndecks = conn.execute("SELECT COUNT(*) FROM decks WHERE account_id=?", (aid,)).fetchone()[0]
+    if ndecks == 0:
+        raise RuntimeError("refusing reset: StandAloneUser has no starter decks "
+                           "(standalone_cards + its data are unavailable here)")
+    conn.execute("DELETE FROM accounts WHERE id <> ?", (aid,))
+    conn.commit()
+    if aid != 1:
+        _renumber_account(conn, aid, 1)   # match the historical single-player account id
+        aid = 1
+    return aid
+
+
+def _renumber_account(conn, old_id, new_id):
+    """Change the (now sole) account's id, updating every child FK. Done with foreign_keys OFF so the
+    parent row can move before its children -- both are fixed in one transaction, so the db is consistent
+    at commit. PRAGMA foreign_keys must be toggled outside a transaction, hence the explicit BEGIN/COMMIT."""
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        conn.execute("BEGIN")
+        for table, col in (("accounts", "id"), ("collections", "account_id"), ("decks", "account_id"),
+                           ("account_entitlements", "account_id"), ("sessions", "account_id"),
+                           ("player_stats", "account_id"), ("campaign_progress", "account_id")):
+            conn.execute("UPDATE %s SET %s=? WHERE %s=?" % (table, col, col), (new_id, old_id))
+        conn.execute("UPDATE sqlite_sequence SET seq=? WHERE name='accounts'", (new_id,))
+        conn.commit()
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON")
 
 
 # ==========================================================================

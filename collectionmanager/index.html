@@ -28,6 +28,7 @@
 <nav id="tabs">
   <button class="tab active" data-tab="collection">Collection</button>
   <button class="tab" data-tab="deck">Deck Builder</button>
+  <button class="tab" data-tab="scenarios">Scenarios</button>
   <button class="tab" data-tab="help">Help</button>
 </nav>
 
@@ -94,6 +95,32 @@
   </div>
 </section>
 
+<!-- ============================ SCENARIOS ============================ -->
+<section id="tab-scenarios" class="tabpane">
+  <div class="toolbar">
+    <span class="meta" id="scnMeta">No database open.</span>
+    <span class="spacer"></span>
+    <button id="scnResetAcct" title="Wipe this account's saved scenario progress">Reset this account</button>
+    <button id="scnResetAll" title="Wipe scenario progress for ALL accounts">Reset ALL</button>
+  </div>
+  <h3 style="margin:6px 2px">Saved progress</h3>
+  <div class="cardlist" id="scnProgress" style="max-height:180px"></div>
+
+  <div class="banner" style="margin:12px 0">
+    <b>Grant</b> marks a scenario complete at every difficulty by writing the same completion
+    state the game saves when you win (account property 0x1054). A scenario is only grantable
+    once it has been <b>played once</b> (that teaches the server its internal id) &mdash; unmapped
+    ones show &ldquo;play once to enable&rdquo;. <b>Reset</b> clears progress. Save to game + relaunch to apply.
+  </div>
+  <div class="toolbar">
+    <button id="scnSelAll">Select all</button>
+    <button id="scnSelNone">Clear selection</button>
+    <span class="spacer"></span>
+    <button id="scnGrant" class="primary">Grant selected (experimental)</button>
+  </div>
+  <div class="cardlist" id="scnGrantList"></div>
+</section>
+
 <!-- ============================ HELP ================================= -->
 <section id="tab-help" class="tabpane">
   <div class="help">
@@ -103,9 +130,12 @@
         <code>SWGTCG-Standalone\_ext\server\swgtcg.db</code>. This is the account
         database the game logs into &mdash; editing it here changes what you own and
         which decks you can play in Skirmish. Works in Microsoft Edge / Chrome.</li>
-      <li>Pick the <b>Account</b> (the launcher logs in as <code>tester1</code> by default).</li>
+      <li>The launcher logs in as <code>StandAloneUser</code> &mdash; the single built-in account
+        (it owns all four starter decks: Imperial / Jedi / Rebel / Sith). Pick it under <b>Account</b>.</li>
       <li><b>Collection</b> tab: set how many copies of each card you own.
         <b>Deck Builder</b>: pick an avatar, add main-deck cards + quests, <b>Save deck</b>.</li>
+      <li><b>Scenarios</b> tab: view saved single-player progress, <b>Reset</b> it, or <b>Grant</b> a
+        scenario complete (a scenario becomes grantable after you&rsquo;ve played it once).</li>
       <li>Click <b>Save to game</b> to write the database back. <b>Important:</b> stop the
         game and the login server first (launcher option 5), or the save can be lost /
         conflict. Then run Play again &mdash; your changes are read at login.</li>
