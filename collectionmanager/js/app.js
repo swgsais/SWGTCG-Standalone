@@ -266,9 +266,29 @@
     A: { name: 'Alt Art', color: '#39c5cf' }
   };
   var allById = {}; CARDS.forEach(function (c) { allById[c.id] = c; });
-  var _artNoted = false;
-  function artNoted() { if (!_artNoted) { _artNoted = true; var n = $('artNote'); if (n) n.style.display = 'block'; } }
+  var _artAvail = null;                                      // null=unknown, else true/false (probed once)
+  function withArt(cb) {
+    if (_artAvail !== null) { cb(_artAvail); return; }
+    var im = new Image();
+    im.onload = function () { _artAvail = true; var n = $('artNote'); if (n) n.style.display = 'none'; cb(true); };
+    im.onerror = function () { _artAvail = false; var n = $('artNote'); if (n) n.style.display = 'block'; cb(false); };
+    im.src = 'art/images/card/100007401.jpg';                // a known set-1 card face
+  }
   function rnd(a) { return a[Math.floor(Math.random() * a.length)]; }
+  function statChips(c) {                                    // cost/atk/def/hp chips, or null if none apply
+    var chips = [];
+    if (c.cost != null) chips.push(['cost', c.cost]);
+    if (c.attack != null) chips.push(['atk', c.attack]);
+    if (c.defense != null) chips.push(['def', c.defense]);
+    if (c.hp != null) chips.push([c.type === 'Avatar' ? 'lvl' : 'hp', c.hp]);
+    if (!chips.length) return null;
+    var row = el('span', 'gstats');
+    chips.forEach(function (kv) {
+      var s = el('span', 'gstat s-' + kv[0]); s.appendChild(el('b', null, String(kv[1])));
+      s.appendChild(document.createTextNode(kv[0])); row.appendChild(s);
+    });
+    return row;
+  }
 
   function initBooster() {
     var sel = $('boosterSet'); if (!sel) return; sel.innerHTML = '';
@@ -300,7 +320,7 @@
     state.colMap = DB.collection(state.acct); markDirty();
     log('Opened ' + count + ' ' + (SET_NAMES[setNum] || ('set ' + setNum)) + ' pack' + (count > 1 ? 's' : '') +
         ': +' + all.length + ' cards to ' + acctName() + '.', 'ok');
-    renderPack(all);
+    withArt(function (has) { renderPack(all, has); });
   }
   function boosterCard(c) {
     var meta = allById[c.id] || {}, rc = (c.rarity || 'C');
@@ -310,21 +330,37 @@
     var art = el('div', 'gart');
     var img = el('img'); img.loading = 'lazy'; img.alt = meta.name || c.name;
     img.src = 'art/images/card/' + c.id + '.jpg';
-    img.onerror = function () { art.classList.add('noart'); art.textContent = (c.type || '?'); artNoted(); };
+    img.onerror = function () { art.classList.add('noart'); art.textContent = (c.type || '?'); };
     art.appendChild(img); card.appendChild(art);
     card.appendChild(el('div', 'gname', meta.name || c.name));
     var mrow = el('div', 'gmeta');
     mrow.appendChild(el('span', 'gtype', c.type));
     var rp = el('span', 'grar', rar.name); rp.style.color = rar.color; mrow.appendChild(rp);
     card.appendChild(mrow);
+    var st = statChips(c); if (st) card.appendChild(st);
     if (meta.text) card.appendChild(el('div', 'gtext', meta.text));
     return card;
   }
-  function renderPack(cards) {
+  function rowCard(c) {                                      // no-art fallback: one detailed row per card
+    var meta = allById[c.id] || {}, rc = (c.rarity || 'C');
+    var rar = RARITY[rc] || { name: rc, color: '#8b97a6' };
+    var row = el('div', 'crow'); row.style.setProperty('--glow', rar.color);
+    row.appendChild(typeBadge({ type: c.type }));
+    row.appendChild(el('span', 'crname', meta.name || c.name));
+    var rp = el('span', 'crrar', rar.name); rp.style.color = rar.color; row.appendChild(rp);
+    var st = statChips(c); if (st) row.appendChild(st);
+    if (meta.text) row.appendChild(el('span', 'crtext', meta.text));
+    return row;
+  }
+  function renderPack(cards, hasArt) {
     var box = $('packResult'); if (!box) return; box.innerHTML = '';
+    box.className = hasArt ? 'packgrid' : 'packrows';
     var order = { M: 0, P: 1, F: 2, A: 2, R: 3, U: 4, C: 5 };
     cards.slice().sort(function (a, b) { return (order[a.rarity] == null ? 9 : order[a.rarity]) - (order[b.rarity] == null ? 9 : order[b.rarity]); })
-      .forEach(function (c, i) { var card = boosterCard(c); card.style.animationDelay = (i * 45) + 'ms'; box.appendChild(card); });
+      .forEach(function (c, i) {
+        var node = hasArt ? boosterCard(c) : rowCard(c);
+        node.style.animationDelay = (i * (hasArt ? 45 : 15)) + 'ms'; box.appendChild(node);
+      });
     $('boosterMeta').textContent = cards.length + ' cards added';
   }
 

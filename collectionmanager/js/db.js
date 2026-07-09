@@ -178,7 +178,8 @@
   }
   function cardsInSet(setNum) {
     if (!tableExists('card_catalog')) return [];
-    return all("SELECT catalog_id AS id, name, type, rarity FROM card_catalog " +
+    return all("SELECT catalog_id AS id, name, type, rarity, cost, attack, defense, " +
+               "health_or_level AS hp FROM card_catalog " +
                "WHERE is_card=1 AND type IS NOT NULL AND rarity IS NOT NULL AND set_num = ?", [setNum | 0]);
   }
   function addOwned(acct, catId, qty) {

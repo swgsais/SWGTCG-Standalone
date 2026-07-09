@@ -131,6 +131,15 @@ function Start-Game {
 function Open-Manager {
     if (-not (Test-Path $Manager)) { Write-Host "Collection Manager not found at $Manager" -ForegroundColor Red; return }
     Stop-Server   # release swgtcg.db so edits can be saved without conflict
+    # Offer to build booster card art if it hasn't been extracted yet (images are never shipped).
+    $artDir = Join-Path $Root 'collectionmanager\art\images\card'
+    if (-not (Test-Path $artDir)) {
+        Write-Host ""
+        Write-Host "The Boosters tab can show real card art, but the images aren't extracted yet." -ForegroundColor Yellow
+        $go = Read-Host "Extract card images now from your cards.rcc? (~140MB, one-time) (y/N)"
+        if ($go -match '^[Yy]') { Extract-CardArt }
+        else { Write-Host "Skipped. Boosters will list cards without art until you run [7] Extract card art." -ForegroundColor DarkGray }
+    }
     Start-Process $Manager | Out-Null
     Write-Host "Opened the Collection & Deck Manager (login server stopped for safe editing)." -ForegroundColor Green
     Write-Host "  In it: 'Open Account DB' -> _ext\server\swgtcg.db, edit, then 'Save to game'." -ForegroundColor Cyan
