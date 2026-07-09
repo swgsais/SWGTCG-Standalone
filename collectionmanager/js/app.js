@@ -367,86 +367,64 @@
   function typeBadge(c) { var t = c.type || '?'; var b = el('span', 'badge t-' + t.toLowerCase(), t.slice(0, 2).toUpperCase()); b.title = t; return b; }
 
   // ---- scenarios / campaign progress -------------------------------------
-  // The real scenario ids (from the game's own data\campaign.dat) + tutorials, grouped by campaign.
-  var SCENARIOS = (function () {
-    var tut = ['Tutorial01_GettingStarted-main', 'Tutorial02_Avatars-main', 'Tutorial03_Quests-main',
-      'Tutorial04_Units-main', 'Tutorial05_Abilities-main', 'Tutorial06_Items-main', 'Tutorial07_Tactics-main',
-      'Tutorial08_UnitCombat-main', 'Tutorial09_AvatarCombat-main', 'Tutorial10_Summary-main', 'Tutorial11_AIFight-main'];
-    var cotf = []; for (var i = 1; i <= 10; i++) cotf.push('COTF_Scenario' + (i < 10 ? '0' + i : '' + i));
-    // Two id formats in campaign.dat: 'XXX_ScenarioL1' (COTF/SOC/GH/AOD) and 'SetNScenarioL1' (sets 5-8).
-    function ld(p) { var a = []; for (var l = 1; l <= 5; l++) a.push(p + '_ScenarioL' + l); for (var d = 1; d <= 5; d++) a.push(p + '_ScenarioD' + d); return a; }
-    function lds(p) { var a = []; for (var l = 1; l <= 5; l++) a.push(p + 'ScenarioL' + l); for (var d = 1; d <= 5; d++) a.push(p + 'ScenarioD' + d); return a; }
-    return [{ label: 'Tutorials', ids: tut },
-            { label: 'Champions of the Force', ids: cotf },
-            { label: 'Squadrons Over Corellia', ids: ld('SOC') },
-            { label: 'Galactic Hunters', ids: ld('GH') },
-            { label: 'Agents of Deception', ids: ld('AOD') },
-            { label: 'The Shadow Syndicate', ids: lds('Set5') },
-            { label: "The Nightsister's Revenge", ids: lds('Set6') },
-            { label: 'Threat of the Conqueror', ids: lds('Set7') },
-            { label: 'The Price of Victory', ids: lds('Set8') }];
-  })();
-
-  // Archetype = a small index (1/2), the value the EXE actually stores (live-RE'd; the 0x13886-9 ids
-  // were a mis-read). Unlock keys off the node property regardless of archetype; this just fills the
-  // per-scenario detail. Grant both archetypes at all difficulties = fully complete.
-  var DIFFS = [1, 2, 3];                       // 1 easy, 2 medium, 3 hard
-  var DIFF_NAME = { 1: 'Easy', 2: 'Med', 3: 'Hard' };
-  function scnArchetypes(id) { return /^Tutorial/i.test(id) ? [1] : [1, 2]; }
+  // The game tracks unlock per CAMPAIGN CHAIN, not per scenario. Live-RE'd (FUN_00882e50 ->
+  // account.getProperty(chainNode), mTypeID==2, value = furthest scenario cleared in that chain):
+  // each of the 8 campaigns has a Light and a Dark chain of 5 scenarios = 16 unlock nodes total.
+  // Granting a campaign sets both chain nodes to full progress, which unlocks all its scenarios.
+  var CAMPAIGNS = [
+    { label: 'Champions of the Force', nodes: [0x157e6, 0x157e7] },
+    { label: 'Squadrons Over Corellia', nodes: [0x157ee, 0x157ef] },
+    { label: 'Galactic Hunters', nodes: [0x157f4, 0x157f5] },
+    { label: 'Agents of Deception', nodes: [0x157fb, 0x157fc] },
+    { label: 'The Shadow Syndicate', nodes: [0x15801, 0x15802] },
+    { label: "The Nightsister's Revenge", nodes: [0x15807, 0x15808] },
+    { label: 'Threat of the Conqueror', nodes: [0x1580d, 0x1580e] },
+    { label: 'The Price of Victory', nodes: [0x15813, 0x15814] }
+  ];
+  var GRANT_VALUE = 5;                                        // full chain progress = all 5 scenarios cleared
 
   function renderScenarios() {
     var meta = $('scnMeta'), prog = $('scnProgress'), grant = $('scnGrantList');
     if (!DB.isOpen()) { meta.textContent = 'No database open. Click "Open Account DB".'; prog.innerHTML = ''; grant.innerHTML = ''; return; }
-    var comp = DB.scenarioCompletion(state.acct);   // [{node_id, archetype_id, difficulty}]
-    var nodemap = DB.scenarioNodemap();             // {scenarioId: node_id}  (learned by playing)
-    var nodeToName = {}; Object.keys(nodemap).forEach(function (s) { nodeToName[nodemap[s]] = s; });
-    var byNode = {}; comp.forEach(function (r) { (byNode[r.node_id] = byNode[r.node_id] || []).push(r); });
-    meta.innerHTML = 'Account <b>' + esc(acctName()) + '</b> &nbsp; ' + comp.length +
-      ' completion record(s), ' + Object.keys(nodemap).length + ' scenario(s) mapped';
+    var comp = DB.scenarioCompletion(state.acct);            // [{node_id, archetype_id, difficulty}]
+    var valByNode = {};                                      // chain node -> max stored progress value
+    comp.forEach(function (r) { valByNode[r.node_id] = Math.max(valByNode[r.node_id] || 0, r.difficulty); });
+    function done(c) { return c.nodes.every(function (n) { return valByNode[n]; }); }
+    meta.innerHTML = 'Account <b>' + esc(acctName()) + '</b> &nbsp; ' +
+      CAMPAIGNS.filter(done).length + ' / ' + CAMPAIGNS.length + ' campaigns unlocked';
     prog.innerHTML = '';
-    if (!comp.length) prog.appendChild(el('div', 'more', 'No scenario progress saved yet. Play a scenario, or grant a mapped one below.'));
-    Object.keys(byNode).forEach(function (node) {
-      var diffs = {}, archs = {};
-      byNode[node].forEach(function (r) { diffs[r.difficulty] = 1; archs[r.archetype_id] = 1; });
+    var any = false;
+    CAMPAIGNS.forEach(function (c) {
+      var l = valByNode[c.nodes[0]] || 0, d = valByNode[c.nodes[1]] || 0;
+      if (!l && !d) return; any = true;
       var row = el('div', 'row');
       row.appendChild(el('span', 'badge t-quest', 'SC'));
-      row.appendChild(el('span', 'name', nodeToName[node] || ('node 0x' + (+node).toString(16))));
-      row.appendChild(el('span', 'tag', Object.keys(diffs).map(function (d) { return DIFF_NAME[d]; }).join('/') + ' ×' + Object.keys(archs).length + ' arch'));
+      row.appendChild(el('span', 'name', c.label));
+      row.appendChild(el('span', 'tag', 'Light ' + l + '/5 · Dark ' + d + '/5'));
       prog.appendChild(row);
     });
+    if (!any) prog.appendChild(el('div', 'more', 'No campaign progress yet. Play, or grant a campaign below.'));
     grant.innerHTML = '';
-    SCENARIOS.forEach(function (grp) {
-      var h = el('div', 'more', grp.label); h.style.fontWeight = '700'; grant.appendChild(h);
-      grp.ids.forEach(function (id) {
-        var node = nodemap[id];
-        var row = el('div', 'row');
-        var cb = el('input', 'scnchk'); cb.type = 'checkbox'; cb.value = id; cb.disabled = !node;
-        var lbl = el('label', 'name', id); lbl.style.cursor = node ? 'pointer' : 'default';
-        if (!node) lbl.style.opacity = '0.55';
-        if (node) lbl.onclick = function () { cb.checked = !cb.checked; };
-        row.appendChild(cb); row.appendChild(lbl);
-        if (node && byNode[node]) row.appendChild(el('span', 'tag own', 'done'));
-        else if (!node) row.appendChild(el('span', 'tag', 'play once to enable'));
-        grant.appendChild(row);
-      });
+    CAMPAIGNS.forEach(function (c, idx) {
+      var row = el('div', 'row');
+      var cb = el('input', 'scnchk'); cb.type = 'checkbox'; cb.value = String(idx);
+      var lbl = el('label', 'name', c.label); lbl.style.cursor = 'pointer'; lbl.onclick = function () { cb.checked = !cb.checked; };
+      row.appendChild(cb); row.appendChild(lbl);
+      if (done(c)) row.appendChild(el('span', 'tag own', 'unlocked'));
+      grant.appendChild(row);
     });
   }
-  function scnSelected() { return Array.prototype.map.call(document.querySelectorAll('.scnchk:checked'), function (c) { return c.value; }); }
-  function scnSetAll(v) { Array.prototype.forEach.call(document.querySelectorAll('.scnchk'), function (c) { if (!c.disabled) c.checked = v; }); }
+  function scnSelected() { return Array.prototype.map.call(document.querySelectorAll('.scnchk:checked'), function (c) { return parseInt(c.value, 10); }); }
+  function scnSetAll(v) { Array.prototype.forEach.call(document.querySelectorAll('.scnchk'), function (c) { c.checked = v; }); }
   function grantScenarios() {
     if (!DB.isOpen()) { log('Open a database first.', 'warn'); return; }
-    var ids = scnSelected();
-    if (!ids.length) { log('Tick mapped scenarios to grant first.', 'warn'); return; }
-    var nodemap = DB.scenarioNodemap(), granted = 0, skipped = 0;
-    ids.forEach(function (id) {
-      var node = nodemap[id];
-      if (!node) { skipped++; return; }
-      scnArchetypes(id).forEach(function (a) { DIFFS.forEach(function (d) { DB.grantCompletion(state.acct, node, a, d); }); });
-      granted++;
+    var idxs = scnSelected();
+    if (!idxs.length) { log('Tick campaigns to unlock first.', 'warn'); return; }
+    idxs.forEach(function (i) {
+      CAMPAIGNS[i].nodes.forEach(function (n) { DB.grantCompletion(state.acct, n, 0, GRANT_VALUE); });
     });
     markDirty();
-    log('Granted ' + granted + ' scenario(s) at all difficulties' + (skipped ? ' (' + skipped + ' skipped, not yet mapped)' : '') +
-        ' to ' + acctName() + '. Save to game + relaunch.', 'ok');
+    log('Granted ' + idxs.length + ' campaign(s) complete to ' + acctName() + '. Save to game + relaunch.', 'ok');
     renderScenarios();
   }
   function resetScenariosAcct() {
