@@ -77,6 +77,7 @@
     sel.disabled = false; $('btnSave').disabled = false;
     state.acct = parseInt(sel.value, 10);
     log('Opened ' + label + '. Accounts: ' + DB.accounts().map(function (a) { return a.username; }).join(', '), 'ok');
+    initBooster();
     selectAccount(state.acct);
     markClean();
     $('connStatus').classList.add('ok');
@@ -252,6 +253,81 @@
     DB.deleteDeck(state.deck.id); markDirty(); log('Deleted deck.', 'ok'); state.deck = newDeck(); refreshDeckList(); renderDeck();
   }
 
+  // ---- booster packs -----------------------------------------------------
+  var SET_NAMES = {
+    1: 'Champions of the Force', 2: 'Squadrons Over Corellia', 3: 'Galactic Hunters',
+    4: 'Agents of Deception', 5: 'The Shadow Syndicate', 6: "The Nightsister's Revenge",
+    7: 'Threat of the Conqueror', 8: 'The Price of Victory'
+  };
+  var RARITY = {
+    C: { name: 'Common', color: '#9aa6b2' }, U: { name: 'Uncommon', color: '#3fb950' },
+    R: { name: 'Rare', color: '#2f81f7' }, F: { name: 'Foil', color: '#a371f7' },
+    M: { name: 'Mythic', color: '#ff8c39' }, P: { name: 'Promo', color: '#f4c430' },
+    A: { name: 'Alt Art', color: '#39c5cf' }
+  };
+  var allById = {}; CARDS.forEach(function (c) { allById[c.id] = c; });
+  var _artNoted = false;
+  function artNoted() { if (!_artNoted) { _artNoted = true; var n = $('artNote'); if (n) n.style.display = 'block'; } }
+  function rnd(a) { return a[Math.floor(Math.random() * a.length)]; }
+
+  function initBooster() {
+    var sel = $('boosterSet'); if (!sel) return; sel.innerHTML = '';
+    var sets = DB.isOpen() ? DB.cardSets() : [];
+    if (!sets.length) { var o = el('option', null, '(open a database)'); o.value = ''; sel.appendChild(o); return; }
+    sets.forEach(function (s) {
+      var o = el('option', null, (SET_NAMES[s.setNum] || ('Set ' + s.setNum)) + '  (' + s.n + ' cards)');
+      o.value = String(s.setNum); sel.appendChild(o);
+    });
+  }
+  function openPack(setNum, count) {
+    if (!DB.isOpen()) { log('Open a database first.', 'warn'); return; }
+    setNum = setNum | 0; count = count || 1;
+    var pool = DB.cardsInSet(setNum);
+    if (!pool.length) { log('No cards found for that set.', 'warn'); return; }
+    var byR = {}; pool.forEach(function (c) { (byR[c.rarity] = byR[c.rarity] || []).push(c); });
+    function pull(r) { return (byR[r] && byR[r].length) ? rnd(byR[r]) : rnd(byR.C || byR.U || byR.R || pool); }
+    var all = [];
+    for (var p = 0; p < count; p++) {
+      for (var i = 0; i < 7; i++) all.push(pull('C'));
+      for (var j = 0; j < 3; j++) all.push(pull('U'));
+      var r = Math.random();                                   // rare slot, with premium upgrades
+      if (r < 0.10 && byR.F) all.push(pull('F'));
+      else if (r < 0.13 && byR.M) all.push(pull('M'));
+      else if (r < 0.15 && byR.P) all.push(pull('P'));
+      else all.push(pull('R'));
+    }
+    all.forEach(function (c) { DB.addOwned(state.acct, c.id, 1); });
+    state.colMap = DB.collection(state.acct); markDirty();
+    log('Opened ' + count + ' ' + (SET_NAMES[setNum] || ('set ' + setNum)) + ' pack' + (count > 1 ? 's' : '') +
+        ': +' + all.length + ' cards to ' + acctName() + '.', 'ok');
+    renderPack(all);
+  }
+  function boosterCard(c) {
+    var meta = allById[c.id] || {}, rc = (c.rarity || 'C');
+    var rar = RARITY[rc] || { name: rc, color: '#8b97a6' };
+    var card = el('div', 'gcard r-' + rc.toLowerCase());
+    card.style.setProperty('--glow', rar.color);
+    var art = el('div', 'gart');
+    var img = el('img'); img.loading = 'lazy'; img.alt = meta.name || c.name;
+    img.src = 'art/images/card/' + c.id + '.jpg';
+    img.onerror = function () { art.classList.add('noart'); art.textContent = (c.type || '?'); artNoted(); };
+    art.appendChild(img); card.appendChild(art);
+    card.appendChild(el('div', 'gname', meta.name || c.name));
+    var mrow = el('div', 'gmeta');
+    mrow.appendChild(el('span', 'gtype', c.type));
+    var rp = el('span', 'grar', rar.name); rp.style.color = rar.color; mrow.appendChild(rp);
+    card.appendChild(mrow);
+    if (meta.text) card.appendChild(el('div', 'gtext', meta.text));
+    return card;
+  }
+  function renderPack(cards) {
+    var box = $('packResult'); if (!box) return; box.innerHTML = '';
+    var order = { M: 0, P: 1, F: 2, A: 2, R: 3, U: 4, C: 5 };
+    cards.slice().sort(function (a, b) { return (order[a.rarity] == null ? 9 : order[a.rarity]) - (order[b.rarity] == null ? 9 : order[b.rarity]); })
+      .forEach(function (c, i) { var card = boosterCard(c); card.style.animationDelay = (i * 45) + 'ms'; box.appendChild(card); });
+    $('boosterMeta').textContent = cards.length + ' cards added';
+  }
+
   function typeBadge(c) { var t = c.type || '?'; var b = el('span', 'badge t-' + t.toLowerCase(), t.slice(0, 2).toUpperCase()); b.title = t; return b; }
 
   // ---- scenarios / campaign progress -------------------------------------
@@ -261,10 +337,18 @@
       'Tutorial04_Units-main', 'Tutorial05_Abilities-main', 'Tutorial06_Items-main', 'Tutorial07_Tactics-main',
       'Tutorial08_UnitCombat-main', 'Tutorial09_AvatarCombat-main', 'Tutorial10_Summary-main', 'Tutorial11_AIFight-main'];
     var cotf = []; for (var i = 1; i <= 10; i++) cotf.push('COTF_Scenario' + (i < 10 ? '0' + i : '' + i));
+    // Two id formats in campaign.dat: 'XXX_ScenarioL1' (COTF/SOC/GH/AOD) and 'SetNScenarioL1' (sets 5-8).
     function ld(p) { var a = []; for (var l = 1; l <= 5; l++) a.push(p + '_ScenarioL' + l); for (var d = 1; d <= 5; d++) a.push(p + '_ScenarioD' + d); return a; }
-    return [{ label: 'Tutorials', ids: tut }, { label: 'Champions of the Force', ids: cotf },
-            { label: 'Agents of Deception', ids: ld('AOD') }, { label: 'Galactic Hunters', ids: ld('GH') },
-            { label: 'Shadow Syndicate (SOC)', ids: ld('SOC') }];
+    function lds(p) { var a = []; for (var l = 1; l <= 5; l++) a.push(p + 'ScenarioL' + l); for (var d = 1; d <= 5; d++) a.push(p + 'ScenarioD' + d); return a; }
+    return [{ label: 'Tutorials', ids: tut },
+            { label: 'Champions of the Force', ids: cotf },
+            { label: 'Squadrons Over Corellia', ids: ld('SOC') },
+            { label: 'Galactic Hunters', ids: ld('GH') },
+            { label: 'Agents of Deception', ids: ld('AOD') },
+            { label: 'The Shadow Syndicate', ids: lds('Set5') },
+            { label: "The Nightsister's Revenge", ids: lds('Set6') },
+            { label: 'Threat of the Conqueror', ids: lds('Set7') },
+            { label: 'The Price of Victory', ids: lds('Set8') }];
   })();
 
   // Archetype = a small index (1/2), the value the EXE actually stores (live-RE'd; the 0x13886-9 ids
@@ -380,6 +464,9 @@
     $('scnSelNone').onclick = function () { scnSetAll(false); };
     $('scnResetAcct').onclick = resetScenariosAcct;
     $('scnResetAll').onclick = resetScenariosAll;
+
+    $('openPack').onclick = function () { openPack(parseInt($('boosterSet').value, 10), 1); };
+    $('openPack10').onclick = function () { openPack(parseInt($('boosterSet').value, 10), 10); };
 
     window.addEventListener('beforeunload', function (e) { if (state.dirty) { e.preventDefault(); e.returnValue = ''; } });
 

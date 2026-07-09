@@ -91,12 +91,21 @@ function Remove-DbSidecars {
 }
 
 function Stop-Server {
+    $stopped = $false
+    # 1) our bundled python by exe path (the normal case)
     $ours = Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
-            Where-Object { $_.ExecutablePath -eq (Resolve-Path $PyExe).Path }
-    foreach ($p in $ours) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }
-    if ($ours) { Start-Sleep -Milliseconds 300 }   # let the OS release the file handle before we clean up
+            Where-Object { $_.ExecutablePath -eq (Resolve-Path $PyExe -ErrorAction SilentlyContinue).Path }
+    foreach ($p in $ours) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue; $stopped = $true }
+    # 2) fallback: kill whatever is actually holding the server ports, so [2] Manager always frees the DB
+    #    even if the process/path match above missed (e.g. server started differently).
+    foreach ($port in 16782, 16783) {
+        Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty OwningProcess -Unique |
+            ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue; $stopped = $true }
+    }
+    if ($stopped) { Start-Sleep -Milliseconds 300 }   # let the OS release the file handle before we clean up
     Remove-DbSidecars
-    if ($ours) { Write-Host "Login server stopped." -ForegroundColor Green } else { Write-Host "Login server was not running." -ForegroundColor DarkGray }
+    if ($stopped) { Write-Host "Login server stopped." -ForegroundColor Green } else { Write-Host "Login server was not running." -ForegroundColor DarkGray }
 }
 
 function Start-Game {
@@ -137,6 +146,16 @@ function Apply-EditedDb {
     Copy-Item $dl.FullName $Db -Force
     Remove-DbSidecars                       # ...and after, so nothing from the old db replays onto it
     Write-Host "Applied '$($dl.Name)' (newest download) -> _ext\server\swgtcg.db. Choose [1] Play to use it." -ForegroundColor Green
+}
+
+function Extract-CardArt {
+    $tool = Join-Path $Ext 'tools\extract_card_art.py'
+    if (-not (Test-Path $tool)) { Write-Host "Extractor not found at $tool" -ForegroundColor Red; return }
+    $rcc = Join-Path $Game 'cards.rcc'
+    if (-not (Test-Path $rcc)) { Write-Host "cards.rcc not found at $rcc (ships with the game client)." -ForegroundColor Red; return }
+    Write-Host "Extracting card art from cards.rcc (~140MB, one-time; images are NOT shipped)..." -ForegroundColor Cyan
+    & $PyExe $tool
+    Write-Host "Open the Collection & Deck Manager -> Boosters to use them." -ForegroundColor Green
 }
 
 function Backup-Saves {
@@ -184,6 +203,7 @@ try {
         Write-Host "   [2] Collection & Deck Manager"
         Write-Host "   [3] Backup saves      [4] Restore saves"
         Write-Host "   [5] Stop login server [6] Apply edited DB from Downloads"
+        Write-Host "   [7] Extract card art  (build booster images from cards.rcc)"
         Write-Host "   [Q] Quit (stops the login server)"
         $choice = Read-Host "Choose"
         switch ($choice.Trim().ToUpper()) {
@@ -193,6 +213,7 @@ try {
             '4'     { Restore-Saves }
             '5'     { Stop-Server }
             '6'     { Apply-EditedDb }
+            '7'     { Extract-CardArt }
             'Q'     { $running = $false }
             default { Write-Host "Unknown choice." -ForegroundColor Yellow }
         }

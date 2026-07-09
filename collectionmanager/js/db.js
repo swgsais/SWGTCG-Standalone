@@ -169,12 +169,30 @@
   }
   function clearCompletion(acct) { if (tableExists('scenario_completion')) run("DELETE FROM scenario_completion WHERE account_id=?", [acct]); }
 
+  /* ---- booster packs (read card_catalog, add pulls to the collection) ---- */
+  function cardSets() {
+    if (!tableExists('card_catalog')) return [];
+    return all("SELECT set_num AS setNum, COUNT(*) AS n FROM card_catalog " +
+               "WHERE is_card=1 AND type IS NOT NULL AND rarity IS NOT NULL AND set_num > 0 " +
+               "GROUP BY set_num ORDER BY set_num");
+  }
+  function cardsInSet(setNum) {
+    if (!tableExists('card_catalog')) return [];
+    return all("SELECT catalog_id AS id, name, type, rarity FROM card_catalog " +
+               "WHERE is_card=1 AND type IS NOT NULL AND rarity IS NOT NULL AND set_num = ?", [setNum | 0]);
+  }
+  function addOwned(acct, catId, qty) {
+    run("INSERT INTO collections(account_id,catalog_id,qty) VALUES(?,?,?) " +
+        "ON CONFLICT(account_id,catalog_id) DO UPDATE SET qty = qty + excluded.qty", [acct, catId, Math.max(1, qty | 0)]);
+  }
+
   global.DB = {
     open: open, isOpen: isOpen, accounts: accounts,
     collection: collection, collectionTotal: collectionTotal, setOwned: setOwned, grantAll: grantAll, clearCollection: clearCollection,
     decks: decks, deck: deck, saveDeck: saveDeck, deleteDeck: deleteDeck,
     campaignProgress: campaignProgress, grantScenario: grantScenario, resetCampaign: resetCampaign, resetAllCampaign: resetAllCampaign,
     scenarioCompletion: scenarioCompletion, scenarioNodemap: scenarioNodemap, grantCompletion: grantCompletion, clearCompletion: clearCompletion,
+    cardSets: cardSets, cardsInSet: cardsInSet, addOwned: addOwned,
     exportBytes: exportBytes
   };
 })(window);

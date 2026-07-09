@@ -29,6 +29,7 @@
   <button class="tab active" data-tab="collection">Collection</button>
   <button class="tab" data-tab="deck">Deck Builder</button>
   <button class="tab" data-tab="scenarios">Scenarios</button>
+  <button class="tab" data-tab="booster">Boosters</button>
   <button class="tab" data-tab="help">Help</button>
 </nav>
 
@@ -121,6 +122,22 @@
   <div class="cardlist" id="scnGrantList"></div>
 </section>
 
+<!-- ============================ BOOSTERS ============================= -->
+<section id="tab-booster" class="tabpane">
+  <div class="toolbar">
+    <label class="acctlabel">Booster set <select id="boosterSet"></select></label>
+    <button id="openPack" class="primary">Open Booster Pack</button>
+    <button id="openPack10" title="Open a full box (10 packs)">Open x10</button>
+    <span class="spacer"></span>
+    <span class="meta" id="boosterMeta"></span>
+  </div>
+  <div id="artNote" class="banner" style="display:none">
+    Card art isn't extracted yet. In the launcher choose <b>[7] Extract card art</b> (one-time, builds
+    the images from your <code>cards.rcc</code>). Packs still work &mdash; cards just show without art until then.
+  </div>
+  <div id="packResult" class="packgrid"></div>
+</section>
+
 <!-- ============================ HELP ================================= -->
 <section id="tab-help" class="tabpane">
   <div class="help">
@@ -136,6 +153,9 @@
         <b>Deck Builder</b>: pick an avatar, add main-deck cards + quests, <b>Save deck</b>.</li>
       <li><b>Scenarios</b> tab: view saved single-player progress, <b>Reset</b> it, or <b>Grant</b> a
         scenario complete (a scenario becomes grantable after you&rsquo;ve played it once).</li>
+      <li><b>Boosters</b> tab: pick a set and <b>Open Booster Pack</b> to add random cards to your
+        collection, shown with art, text and a rarity glow. Card art isn&rsquo;t shipped &mdash; run the
+        launcher&rsquo;s <b>[7] Extract card art</b> once to build it from your own <code>cards.rcc</code>.</li>
       <li>Click <b>Save to game</b> to write the database back. <b>Important:</b> stop the
         game and the login server first (launcher option 5), or the save can be lost /
         conflict. Then run Play again &mdash; your changes are read at login.</li>

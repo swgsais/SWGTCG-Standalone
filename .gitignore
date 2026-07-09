@@ -23,3 +23,6 @@ _ext/server/probe_*.cdb
 _ext/server/*.log
 _ext/server/campaign_keys.log
 _ext/server/write_key.log
+
+# Extracted card art (141MB, regenerate from cards.rcc via rcc_extract_tool)
+collectionmanager/art/
