@@ -150,20 +150,23 @@ def _campaign_key(body):
     return "default"
 
 
-# --- campaign completion: parse the 415 report + build account property 0x1054 ---------------------
-# The campaign tree reads account property 0x1054 (an IntValueMap node->{archetype->IntegerList[diff]})
-# from the GetAccountInfo(297) reply. On scenario completion the client sends SetCampaignStatus(415)
-# carrying the nodeId (0x157xx), an archetype id (0x13886..9) and a difficulty (1/2/3). We classify the
-# 415's ints by range (robust to the exact field/version layout) and store them; at login we rebuild
-# 0x1054 from the stored completions. (Full RE: workflow decode of CID_415/454 + the 4 tree readers.)
+# --- campaign completion: parse the 415 report + build the login campaign properties ---------------
+# Byte-verified model (exe writer FUN_006409d0 + live captures srv_194355/srv_181808/srv_001628):
+# on a scenario WIN (and only a win) the client sends AccountCommand_SetCampaignStatus(415) with body
+#   [acct=0][chainNodeId 0x157xx][scenarioIndex 1..5 (tutorials 1..11)][difficulty 1/2/3]
+#   [archetypeId 0x13886 rebel/0x13887 sith/0x13888 jedi/0x13889 imperial][""]
+# At login the campaign tree (FUN_10068cd0 via Account+0x34, delivered on IntroduceAccount(114)) reads:
+#   (a) a flat type-2 int property per chain node = FURTHEST SCENARIO INDEX cleared (unlock state), and
+#   (b) property 0x1054 = IntValueMap node -> {scenarioIndex -> {archetypeId -> IntegerList[diffs]}}
+#       (the per-archetype/per-difficulty completion detail).
 _NODE_LO, _NODE_HI = 0x157D0, 0x15830     # campaign/scenario node ids (tutorials 0x157D2)
-_CAMPAIGN_PARAM_KEY = 0x13888             # == hash("archetype"); the CONSTANT middle level in the 0x1054
-                                          # nesting (live-captured from the exe writer FUN_006409d0).
+_ARCH_LO, _ARCH_HI = 0x13886, 0x13889     # rebel/sith/jedi/imperial archetype ids
 
 def _parse_415(body):
-    """-> (node_id, archetype, difficulty). 415 fields (positional, after the AccountCommand base int):
-    [node, difficulty, archetype, paramKeyHash(0x13888), ""]. archetype is a small value (1/2), NOT the
-    0x13888 hash (that was a mis-read). node/arch None if not present."""
+    """-> (node_id, scenario_index, difficulty, archetype). Fields are positional after the
+    AccountCommand base int; archetype is the 0x1388x id (the deck's "archetype" game param,
+    NOT a constant hash -- it only looked constant because early captures were all Jedi decks).
+    node/archetype are None when absent."""
     ints, i = [], 0
     while i < len(body):
         try:
@@ -172,56 +175,157 @@ def _parse_415(body):
             break
         ints.append(v)
     node = next((v for v in ints if _NODE_LO <= v <= _NODE_HI), None)
-    arch = None
-    diff = 1
+    index, diff, arch = 1, 1, None
     if node is not None:
         idx = ints.index(node)
-        if idx + 1 < len(ints) and ints[idx + 1] in (1, 2, 3):
-            diff = ints[idx + 1]      # difficultyValue = field right after the nodeId
-        if idx + 2 < len(ints):
-            arch = ints[idx + 2]      # archetype = the field after difficulty (1/2), not the 0x13888 hash
-    return node, arch, diff
+        if idx + 1 < len(ints) and 1 <= ints[idx + 1] <= 11:
+            index = ints[idx + 1]     # scenario index within the chain (1..5; tutorials 1..11)
+        if idx + 2 < len(ints) and ints[idx + 2] in (1, 2, 3):
+            diff = ints[idx + 2]      # difficulty 1 easy / 2 medium / 3 hard
+        if idx + 3 < len(ints) and _ARCH_LO <= ints[idx + 3] <= _ARCH_HI:
+            arch = ints[idx + 3]      # archetype id 0x13886..0x13889
+    return node, index, diff, arch
 
-def _value_integerlist(ints):
-    """ValueData IntegerList (mTypeID 6): classid22, ver1, mTypeID6, ownRef1, count, ints."""
-    return (enc_int(22) + enc_int(1) + enc_int(6) + enc_int(1)
+# ValueData encodings mirror the client's own writer byte-for-byte (captured 118 frames): classid 22,
+# VERSION 4, mTypeID, ownRef (1 for the top-level per-property ValueData, 0 for nested ones), payload.
+def _value_integerlist(ints, own=0):
+    """ValueData IntegerList (mTypeID 6): classid22, ver4, mTypeID6, ownRef, count, ints."""
+    return (enc_int(22) + enc_int(4) + enc_int(6) + enc_int(own)
             + enc_int(len(ints)) + b"".join(enc_int(v) for v in ints))
 
-def _value_intvaluemap(items):
-    """ValueData IntValueMap (mTypeID 0xE): classid22, ver1, mTypeID0xE, ownRef1, count, then
+def _value_intvaluemap(items, own=0):
+    """ValueData IntValueMap (mTypeID 0xE): classid22, ver4, mTypeID0xE, ownRef, count, then
     count*(enc_int(key) + <nested ValueData bytes>). items = list of (int_key, value_bytes)."""
     body = enc_int(len(items))
     for k, v in items:
         body += enc_int(k) + v
-    return enc_int(22) + enc_int(1) + enc_int(0xE) + enc_int(1) + body
+    return enc_int(22) + enc_int(4) + enc_int(0xE) + enc_int(own) + body
 
 def _value_int2(v):
     """ValueData scalar int, mTypeID 2 (the type the unlock reader FUN_00882e50/FUN_005d81a0 expects
-    for a per-scenario completion property): classid22, ver1, mTypeID2, ownRef1, value."""
-    return enc_int(22) + enc_int(1) + enc_int(2) + enc_int(1) + enc_int(v)
+    for a per-node completion property). Top-level per-property value => ownRef 1."""
+    return enc_int(22) + enc_int(4) + enc_int(2) + enc_int(1) + enc_int(v)
 
 def build_node_props(comp):
-    """The REAL persistence the standalone's tree reads for unlock: a flat top-level account property
-    keyed by each completed scenario's node id, value = a type-2 int (live-RE'd from FUN_00882e50 ->
-    account.getProperty(node) -> mTypeID==2). Returns a list of (node_key, value_bytes) property entries.
-    Value = the max difficulty cleared for that node (1 easy / 2 med / 3 hard)."""
-    out = []
-    for node, archs in comp.items():
-        maxdiff = max((d for diffs in archs.values() for d in diffs), default=1)
-        out.append((node, _value_int2(maxdiff)))
-    return out
+    """Flat unlock properties: one type-2 int per chain node, value = the FURTHEST SCENARIO INDEX
+    cleared in that chain (live-RE'd from FUN_00882e50; the index, NOT the difficulty).
+    comp = {node: {scenario_index: {archetype: [difficulties]}}} -> [(node_key, value_bytes)]."""
+    return [(node, _value_int2(max(idxmap))) for node, idxmap in comp.items()]
 
 def build_prop_0x1054(comp):
-    """comp = {node_id: {archetype: [difficulties]}} -> the property entry bytes for the 114 PropertySet.
-    EXE structure (live-captured from the writer FUN_006409d0's create path):
-        0x1054 (IntValueMap) [node] -> IntValueMap [0x13888] -> IntValueMap [archetype] -> IntegerList[difficulties]
-    i.e. there is a CONSTANT 0x13888 ("archetype" param hash) map level between the node and the archetype."""
+    """comp = {node: {scenario_index: {archetype: [difficulties]}}} -> property entry bytes for the
+    114 PropertySet. EXE structure (writer FUN_006409d0 create path, lines 161-299):
+        0x1054 IntValueMap [node] -> IntValueMap [scenarioIndex] -> IntValueMap [archetypeId]
+               -> IntegerList[difficulties]
+    ALWAYS send this property (empty map when no completions): the client's post-win updater asserts
+    getProperty(0x1054).mTypeID == kIntValueMapTypeID on the first win."""
     outer = []
-    for node, archs in comp.items():
-        arch_map = [(arch, _value_integerlist(sorted(set(diffs)))) for arch, diffs in archs.items()]
-        mid = [(_CAMPAIGN_PARAM_KEY, _value_intvaluemap(arch_map))]
-        outer.append((node, _value_intvaluemap(mid)))
-    return enc_int(0x1054) + _value_intvaluemap(outer)
+    for node, idxmap in sorted(comp.items()):
+        lvl2 = []
+        for index, archmap in sorted(idxmap.items()):
+            lvl3 = [(arch, _value_integerlist(sorted(set(diffs))))
+                    for arch, diffs in sorted(archmap.items())]
+            lvl2.append((index, _value_intvaluemap(lvl3)))
+        outer.append((node, _value_intvaluemap(lvl2)))
+    return enc_int(0x1054) + _value_intvaluemap(outer, own=1)
+
+
+# --- scenario reward cards (campaign.dat: "Reward card - X") ----------------------------------------
+# scenario_rewards.json (generated from campaign.dat + card_catalog) maps each (chain node, scenario
+# index) to its reward card. Two retail variants:
+#   "both archetypes (6 possible)": one reward per unique (archetype, difficulty) win -- 2 archetypes
+#       x 3 difficulties; the reward is that scenario's rarity-F loot card (foil on Hard per blurb;
+#       the catalog has a single row for both).
+#   "each different archetype": standalone/event scenarios -- one reward per archetype (difficulty-
+#       agnostic; these scenarios force difficulty 2); the reward is the era's Promo card.
+_REWARD_MAP = None
+def _reward_for(node, index):
+    global _REWARD_MAP
+    if _REWARD_MAP is None:
+        _REWARD_MAP = {}
+        try:
+            import json
+            p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scenario_rewards.json")
+            for e in json.load(open(p, encoding="utf-8")):
+                _REWARD_MAP[(e["node_id"], e["scenario_ordinal"])] = e
+        except Exception as e:
+            log(16783, 0, "scenario_rewards.json load FAILED: %s (no reward grants this run)" % e)
+    return _REWARD_MAP.get((node, index))
+
+def grant_scenario_reward(dbc, acct, node, index, diff, arch):
+    """Grant the scenario's reward card for a live 415 win, once per unique win coordinate.
+    Returns (catalog_id, reward_name) when a new card was granted, else None."""
+    e = _reward_for(node, index)
+    if not e or arch is None:
+        return None
+    catid = e.get("foil_id") or e.get("normal_id")
+    if not catid:
+        return None
+    dkey = 0 if e.get("phrasing") == "each different archetype" else diff
+    if dbmod.record_scenario_reward(dbc, acct, e["scenario_id"], arch, dkey, catid):
+        return catid, e.get("reward_name", "?")
+    return None
+
+
+# --- AccountCommand_SetPreferences(118): per-attribute preference store ------------------------------
+def _skip_valuedata(body, i):
+    """Walk one serialized ValueData at offset i; return the offset just past it.
+    Layout (client writer, capture-verified): [classid 22][ver][mTypeID][ownRef][payload by type:
+    2 Int, 3 String, 6 IntegerList, 7 StringList, 0xE IntValueMap (nested ValueData per entry)]."""
+    cls, i = dec_int(body, i)
+    if cls != 22:
+        raise ValueError("ValueData classid %d at %d" % (cls, i))
+    _ver, i = dec_int(body, i)
+    mtype, i = dec_int(body, i)
+    _own, i = dec_int(body, i)
+    if mtype == 2:
+        _, i = dec_int(body, i)
+    elif mtype == 3:
+        _, i = dec_str(body, i)
+    elif mtype == 6:
+        n, i = dec_int(body, i)
+        for _ in range(n):
+            _, i = dec_int(body, i)
+    elif mtype == 7:
+        n, i = dec_int(body, i)
+        for _ in range(n):
+            _, i = dec_str(body, i)
+    elif mtype == 0xE:
+        n, i = dec_int(body, i)
+        for _ in range(n):
+            _, i = dec_int(body, i)          # int key
+            i = _skip_valuedata(body, i)     # nested value
+    else:
+        raise ValueError("ValueData mTypeID %d" % mtype)
+    return i
+
+def _parse_118(body):
+    """Parse an AccountCommand_SetPreferences(118) body -> [(attr_id, raw_valuedata_bytes), ...].
+    Body (after the 12-byte client header, capture-verified against 11 real frames):
+    [118][ver][118][ver][acctId][nullFlag] then if nullFlag==0: [23][ver][count] count x
+    ([attrId][ValueData])."""
+    i = 0
+    _, i = dec_int(body, i); _, i = dec_int(body, i)    # envelope L1
+    _, i = dec_int(body, i); _, i = dec_int(body, i)    # envelope L2
+    _, i = dec_int(body, i)                             # AccountCommand.mAccountID
+    flag, i = dec_int(body, i)                          # nullable-subobject flag (0 = present)
+    if flag != 0:
+        return []
+    _, i = dec_int(body, i); _, i = dec_int(body, i)    # PropertySet classid 23, ver
+    count, i = dec_int(body, i)
+    out = []
+    for _ in range(count):
+        attr, i = dec_int(body, i)
+        start = i
+        i = _skip_valuedata(body, i)
+        out.append((attr, body[start:i]))
+    return out
+
+# Attrs never replayed from account_prefs at login: 0xfc5 entitlements are server-owned, and the
+# campaign attrs (0x1054 + the flat 0x157xx node props the campaign writer also sends over 118) are
+# rebuilt from scenario_completion -- echoing both sources would duplicate entries in one propset.
+def _pref_replayable(attr):
+    return attr != 0xFC5 and attr != 0x1054 and not (_NODE_LO <= attr <= _NODE_HI)
 
 
 def dispatch(conn, n, payload, acct=None, dbc=None):
@@ -526,21 +630,26 @@ def dispatch(conn, n, payload, acct=None, dbc=None):
             log(16783, n, "-> answered Casual button: ChangeLobbyDisplay(291, display=%d)" % CASUAL_CAT)
         return
 
-    if cid == 415:                         # ★ SCENARIO COMPLETION report (AccountCommand_SetCampaignStatus).
-        # Carries (nodeId 0x157xx, archetypeId 0x1388x, difficulty 1/2/3). We store it STRUCTURED and rebuild
-        # account property 0x1054 in the 297 login reply -- the only thing that actually persists the campaign
-        # tree (a replayed 415 is a client-side no-op: its apply handler is `return 1`). See _parse_415.
+    if cid == 415:                         # ★ SCENARIO WIN report (AccountCommand_SetCampaignStatus).
+        # Carries (chainNodeId 0x157xx, scenarioIndex, difficulty 1/2/3, archetypeId 0x1388x) -- sent
+        # only on a WIN. We store it STRUCTURED and rebuild the flat unlock props + property 0x1054 on
+        # IntroduceAccount(114) at login (a replayed 415 is a client-side no-op: its apply handler is
+        # `return 1`). New unique wins also claim the scenario's reward card (campaign.dat mechanic).
         if dbc is not None:
             try:
-                node, arch, diff = _parse_415(body)
+                node, index, diff, arch = _parse_415(body)
                 dbmod.save_campaign_frame(dbc, acct, 415, "node_%s" % node, body)   # keep raw for debugging
                 if node is not None and arch is not None:
-                    dbmod.record_scenario_completion(dbc, acct, node, arch, diff)
+                    new = dbmod.record_scenario_completion(dbc, acct, node, index, arch, diff)
                     sname = LAST_SCENARIO_STR.get(acct)                             # learn string<->node pairing
                     if sname:
                         dbmod.learn_scenario_node(dbc, sname, node, arch)
-                    log(16783, n, "-> SAVED completion acct=%s node=0x%x arch=0x%x diff=%s name=%s"
-                        % (acct, node, arch, diff, sname))
+                    log(16783, n, "-> SAVED completion acct=%s node=0x%x idx=%s diff=%s arch=0x%x new=%s name=%s"
+                        % (acct, node, index, diff, arch, new, sname))
+                    reward = grant_scenario_reward(dbc, acct, node, index, diff, arch)
+                    if reward:
+                        log(16783, n, "-> REWARD granted acct=%s card=%d (%s) -- in the collection at next launch"
+                            % (acct, reward[0], reward[1]))
                 else:
                     log(16783, n, "-> 415 acct=%s UNPARSED (node=%s arch=%s) raw=%s"
                         % (acct, node, arch, hexdump(body)))
@@ -558,6 +667,22 @@ def dispatch(conn, n, payload, acct=None, dbc=None):
                 log(16783, n, "-> scenario report acct=%s name=%s (remembered for nodemap)" % (acct, key))
             except Exception as e:
                 log(16783, n, "-> 487 save FAILED acct=%s: %s" % (acct, e))
+        return
+
+    if cid == 118:                         # ★ AccountCommand_SetPreferences -- settings avatar (attr 0x1007),
+        # privacy masks (0x1005/0x1006), welcome-seen flags (0x4c4), plus the campaign writer's own
+        # 0x1054/0x157xx echo. PARTIAL updates: persist per-ATTRIBUTE (raw ValueData bytes) and replay
+        # the non-server-owned attrs on the IntroduceAccount(114) propset at login. Fire-and-forget
+        # (retail apply handler just merges + returns 1), so no ACK.
+        if dbc is not None:
+            try:
+                attrs = _parse_118(body)
+                for attr, raw in attrs:
+                    dbmod.save_account_pref(dbc, acct, attr, raw)
+                log(16783, n, "-> SetPreferences saved acct=%s attrs=%s"
+                    % (acct, ",".join("0x%x" % a for a, _ in attrs) or "(none)"))
+            except Exception as e:
+                log(16783, n, "-> 118 preference save FAILED acct=%s: %s" % (acct, e))
         return
 
     # Everything else (buddies/ignore/tournament/etc.): DROP. Never relay raw client state to the peer.
@@ -1822,15 +1947,62 @@ def build_eqdeck_subobject(deck_id, deck_name, main_cards, avatar_catid, quest_c
     if ver > 6: out += avatar_subobj                          # +0xac avatar Card object
     return out
 
-# Avatar Card sub-object (+0xac) bytes, extracted verbatim from the client's own deck upload
-# (captures/srv_181719_p16783_c2.bin). Keyed by avatar catalog id. Needed for the v10 EQDeck.
+# Avatar Card sub-object (+0xac) bytes for the v10 EQDeck. WHY THIS MATTERS: the scenario dialog's
+# faction gate (FUN_007014b0) reads the deck's archetype from the EQDeck's EMBEDDED avatar object
+# (+0xac, faction property 0x13d19). EQDeck::clone resolves the avatar locally first but then
+# UNCONDITIONALLY copyFrom()s the wire +0xac object -- so a v6 deck (no +0xac) zeroes the faction
+# and EVERY deck passes EVERY scenario. Serving v10 decks with the real avatar record restores the
+# retail same-side rule (Light scenarios need Rebel/Jedi, Dark need Imperial/Sith).
+# The +0xac wire format IS a raw storage.dat record (classid-80037 object; byte-verified against
+# starter_avatar_100007836.eqcard, which differs only by one extra prop 797 the gate never reads),
+# so we index TCGStandalone\data\archetypes\storage.dat lazily and serve records verbatim.
+# A starter_avatar_<id>.eqcard file next to the server still overrides (capture-exact bytes).
 _AVATAR_SUBOBJ_DIR = os.path.dirname(os.path.abspath(__file__))
+_STORAGE_DAT = os.path.join(os.path.dirname(os.path.dirname(_AVATAR_SUBOBJ_DIR)),
+                            "TCGStandalone", "data", "archetypes", "storage.dat")
+_ARCHETYPE_RECORDS = None
+def _storage_records():
+    """Lazy {record_id: raw_decompressed_record_bytes} index of the client's ArchetypeDB
+    (6-byte header, then back-to-back zlib streams; record id = the 5th varint)."""
+    global _ARCHETYPE_RECORDS
+    if _ARCHETYPE_RECORDS is None:
+        _ARCHETYPE_RECORDS = {}
+        try:
+            import zlib
+            data = open(_STORAGE_DAT, "rb").read()
+            pos, size = 6, len(data)
+            while pos < size - 1:
+                if not (data[pos] == 0x78 and data[pos + 1] == 0x9C):
+                    nxt = data.find(b"\x78\x9c", pos)
+                    if nxt < 0:
+                        break
+                    pos = nxt
+                d = zlib.decompressobj()
+                rec = d.decompress(data[pos:]) + d.flush()
+                consumed = (size - pos) - len(d.unused_data)
+                if consumed <= 0:
+                    break
+                try:
+                    i = 0
+                    for _ in range(4):
+                        _, i = dec_int(rec, i)
+                    rid, _ = dec_int(rec, i)
+                    _ARCHETYPE_RECORDS[rid] = rec
+                except Exception:
+                    pass
+                pos += consumed
+            log(16783, 0, "ArchetypeDB indexed: %d records from %s" % (len(_ARCHETYPE_RECORDS), _STORAGE_DAT))
+        except Exception as e:
+            log(16783, 0, "ArchetypeDB index FAILED (%s): decks fall back to v6, faction gate stays off" % e)
+    return _ARCHETYPE_RECORDS
+
 def load_avatar_subobj(avatar_catid):
     p = os.path.join(_AVATAR_SUBOBJ_DIR, "starter_avatar_%d.eqcard" % avatar_catid)
     try:
         return open(p, "rb").read()
     except Exception:
-        return b""   # -> build_eqdeck_subobject falls back to version 6 (no embedded avatar card)
+        pass
+    return _storage_records().get(avatar_catid, b"")   # b"" -> v6 fallback (no embedded avatar card)
 
 def build_populate_online_decks(decks):
     """DeckCommand_PopulateOnlineDeckData(363) — SERVER->CLIENT push that fills the deck picker.
@@ -2018,16 +2190,31 @@ def handle(conn, addr, port):
                             _icomp = dbmod.load_scenario_completion(dbc, ACCT)
                         except Exception:
                             _icomp = {}
-                        if _icomp:
-                            # (a) flat per-node type-2 property = the UNLOCK state the tree reader
-                            # (FUN_00882e50 -> account.getProperty(node), mTypeID==2) actually checks.
-                            for _nkey, _nval in build_node_props(_icomp):
-                                _iprops += enc_int(_nkey) + _nval
-                                _inp += 1
-                            # (b) 0x1054 nested map = the completion detail (difficulties/archetypes).
-                            _iprops += build_prop_0x1054(_icomp)
+                        # (a) flat per-node type-2 property = the UNLOCK state the tree reader
+                        # (FUN_00882e50 -> account.getProperty(node), mTypeID==2) actually checks.
+                        # Value = furthest scenario INDEX cleared in the chain.
+                        for _nkey, _nval in build_node_props(_icomp):
+                            _iprops += enc_int(_nkey) + _nval
                             _inp += 1
-                            log(port, n, "-> campaign on IntroduceAccount(114): %d node(s) (flat unlock props + 0x1054)" % len(_icomp))
+                        # (b) 0x1054 nested map = the completion detail (index -> archetype -> diffs).
+                        # ALWAYS sent (empty map when no completions): the client's post-win updater
+                        # (FUN_006409d0:162) asserts getProperty(0x1054).mTypeID == kIntValueMapTypeID.
+                        _iprops += build_prop_0x1054(_icomp)
+                        _inp += 1
+                        log(port, n, "-> campaign on IntroduceAccount(114): %d node(s) (flat unlock props + 0x1054)" % len(_icomp))
+                    # (c) stored client preferences (SetPreferences 118): settings avatar 0x1007,
+                    # privacy masks 0x1005/0x1006, welcome-seen 0x4c4, ... -- raw ValueData bytes
+                    # echoed back verbatim. Server-owned/rebuilt attrs are skipped (_pref_replayable).
+                    try:
+                        _prefs = [(a, v) for a, v in dbmod.load_account_prefs(dbc, ACCT) if _pref_replayable(a)]
+                    except Exception:
+                        _prefs = []
+                    for _pattr, _praw in _prefs:
+                        _iprops += enc_int(_pattr) + _praw
+                        _inp += 1
+                    if _prefs:
+                        log(port, n, "-> prefs on IntroduceAccount(114): %s"
+                            % ",".join("0x%x" % a for a, _ in _prefs))
                     ent_propset = (enc_int(0) + enc_int(23) + enc_int(1)          # PRESENT PropertySet(23) v1
                                    + enc_int(_inp) + _iprops)
                     # base id (AccountCommand+0x4, read by FUN_10009fc0) MUST equal ACCT: the

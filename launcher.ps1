@@ -203,7 +203,7 @@ try {
         $hostsOk = Test-Hosts
         Write-Host ""
         Write-Host "======================================================" -ForegroundColor DarkCyan
-        Write-Host "   Star Wars Galaxies TCG -- Standalone (offline)  V2"  -ForegroundColor White
+        Write-Host "   Star Wars Galaxies TCG -- Standalone (offline)  V3"  -ForegroundColor White
         Write-Host "======================================================" -ForegroundColor DarkCyan
         Write-Host ("   hosts entries: " + $(if ($hostsOk) { "OK" } else { "MISSING (run 'Add Hosts Entries.cmd')" })) -ForegroundColor $(if ($hostsOk) { 'Green' } else { 'Yellow' })
         Write-Host ("   login server : " + $(if (Test-ServerUp) { "running" } else { "stopped" })) -ForegroundColor DarkGray

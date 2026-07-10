@@ -21,9 +21,12 @@
     acct: null,             // active account id
     colMap: {},             // catalog_id -> qty for the active account
     deck: null,             // working deck {id?, name, avatar, main:[{id,qty}], quests:[id...]}
+    mythic: {},             // catalog_id -> 1 for AI-scenario-only Mythic cards (from the open DB)
     dirty: false,
     supported: !!window.showOpenFilePicker
   };
+
+  function isMythic(id) { return !!state.mythic[id]; }
 
   function $(id) { return document.getElementById(id); }
   function el(t, c, x) { var e = document.createElement(t); if (c) e.className = c; if (x != null) e.textContent = x; return e; }
@@ -76,6 +79,12 @@
     });
     sel.disabled = false; $('btnSave').disabled = false;
     state.acct = parseInt(sel.value, 10);
+    state.mythic = {};
+    DB.mythicIds().forEach(function (id) { state.mythic[id] = 1; });
+    var avSel = $('deckAvatar');
+    Array.prototype.slice.call(avSel.options).forEach(function (o) {
+      if (isMythic(parseInt(o.value, 10))) avSel.removeChild(o);
+    });
     log('Opened ' + label + '. Accounts: ' + DB.accounts().map(function (a) { return a.username; }).join(', '), 'ok');
     initBooster();
     selectAccount(state.acct);
@@ -104,7 +113,11 @@
     log('Account ' + acct + ': ' + DB.collectionTotal(acct) + ' cards, ' + DB.decks(acct).length + ' decks.', 'ok');
   }
 
-  function newDeck() { return { id: null, name: 'New Deck', avatar: (AVATARS[0] ? AVATARS[0].id : 0), main: [], quests: [] }; }
+  function newDeck() {
+    var av = 0;
+    for (var i = 0; i < AVATARS.length; i++) if (!isMythic(AVATARS[i].id)) { av = AVATARS[i].id; break; }
+    return { id: null, name: 'New Deck', avatar: av, main: [], quests: [] };
+  }
   function ownedQty(id) { return state.colMap[id] || 0; }
 
   // ---- collection ----
@@ -128,7 +141,9 @@
   }
   function colRow(c, owned) {
     var row = el('div', 'row'); row.appendChild(typeBadge(c));
-    var nm = el('span', 'name', c.name); if (c.is_avatar) nm.appendChild(el('span', 'tag', 'avatar')); row.appendChild(nm);
+    var nm = el('span', 'name', c.name); if (c.is_avatar) nm.appendChild(el('span', 'tag', 'avatar'));
+    if (isMythic(c.id)) nm.appendChild(el('span', 'tag', 'AI only'));
+    row.appendChild(nm);
     var ctl = el('span', 'qtyctl');
     var minus = el('button', 'sm', '−'), val = el('input', 'qty'), plus = el('button', 'sm', '+');
     val.type = 'number'; val.min = '0'; val.value = owned;
@@ -141,9 +156,10 @@
   }
   function grantAll() {
     if (!DB.isOpen()) { log('Open a database first.', 'warn'); return; }
-    DB.grantAll(state.acct, PLAYABLE.map(function (c) { return c.id; }), MAX_COPIES);
+    var ids = PLAYABLE.filter(function (c) { return !isMythic(c.id); }).map(function (c) { return c.id; });
+    DB.grantAll(state.acct, ids, MAX_COPIES);
     state.colMap = DB.collection(state.acct); markDirty();
-    log('Granted ' + MAX_COPIES + ' of every playable card to ' + acctName() + '.', 'ok'); renderCollection(); renderDeck();
+    log('Granted ' + MAX_COPIES + ' of every playable card to ' + acctName() + ' (AI-only Mythics excluded).', 'ok'); renderCollection(); renderDeck();
   }
   function clearAll() {
     if (!DB.isOpen()) return;
@@ -163,6 +179,7 @@
   function deckMainRow(id) { for (var k = 0; k < state.deck.main.length; k++) if (state.deck.main[k].id === id) return state.deck.main[k]; return null; }
   function addToDeck(id) {
     var c = byId[id]; if (!c) return;
+    if (isMythic(id)) { log(c.name + ' is an AI-scenario-only Mythic card and cannot be used in player decks.', 'warn'); return; }
     if (c.type === 'Quest') { if (state.deck.quests.indexOf(id) < 0) state.deck.quests.push(id); }
     else { var r = deckMainRow(id); if (r) { if (r.qty < MAX_COPIES) r.qty++; } else state.deck.main.push({ id: id, qty: 1 }); }
     renderDeck();
@@ -178,6 +195,7 @@
     for (var i = 0; i < PLAYABLE.length; i++) {
       var c = PLAYABLE[i];
       if (c.is_avatar) continue;
+      if (isMythic(c.id)) continue;
       if (filt === 'main') { if (!MAIN_TYPES[c.type]) continue; } else if (c.type !== filt) continue;
       if (q && c.name.toLowerCase().indexOf(q) < 0) continue;
       if (ownedOnly && ownedQty(c.id) === 0) continue;
@@ -226,6 +244,10 @@
     if (main !== 50) warns.push('Main deck is ' + main + ' (Standard is 50).');
     if (quests > 4) warns.push(quests + ' quests (max 4).');
     state.deck.main.forEach(function (r) { if (r.qty > MAX_COPIES) warns.push((byId[r.id] ? byId[r.id].name : r.id) + ' has ' + r.qty + ' copies.'); });
+    state.deck.main.concat(state.deck.quests.map(function (id) { return { id: id }; })).forEach(function (r) {
+      if (isMythic(r.id)) warns.push((byId[r.id] ? byId[r.id].name : r.id) + ' is AI-scenario-only (Mythic) -- remove it.');
+    });
+    if (av && isMythic(av.id)) warns.push('Avatar ' + av.name + ' is AI-scenario-only (Mythic) -- pick another.');
     if (av && DB.isOpen() && ownedQty(av.id) === 0) warns.push('You do not own avatar ' + av.name + ' (grant it in Collection).');
     var box = $('deckValidate');
     if (warns.length) { box.className = 'validate warn'; box.innerHTML = '&#9888; ' + warns.map(esc).join('<br>&#9888; '); }
@@ -302,7 +324,7 @@
   function openPack(setNum, count) {
     if (!DB.isOpen()) { log('Open a database first.', 'warn'); return; }
     setNum = setNum | 0; count = count || 1;
-    var pool = DB.cardsInSet(setNum);
+    var pool = DB.cardsInSet(setNum).filter(function (c) { return c.rarity !== 'M'; });   // Mythics are AI-scenario-only, never in packs
     if (!pool.length) { log('No cards found for that set.', 'warn'); return; }
     var byR = {}; pool.forEach(function (c) { (byR[c.rarity] = byR[c.rarity] || []).push(c); });
     function pull(r) { return (byR[r] && byR[r].length) ? rnd(byR[r]) : rnd(byR.C || byR.U || byR.R || pool); }
@@ -312,8 +334,7 @@
       for (var j = 0; j < 3; j++) all.push(pull('U'));
       var r = Math.random();                                   // rare slot, with premium upgrades
       if (r < 0.10 && byR.F) all.push(pull('F'));
-      else if (r < 0.13 && byR.M) all.push(pull('M'));
-      else if (r < 0.15 && byR.P) all.push(pull('P'));
+      else if (r < 0.12 && byR.P) all.push(pull('P'));
       else all.push(pull('R'));
     }
     all.forEach(function (c) { DB.addOwned(state.acct, c.id, 1); });
@@ -368,9 +389,19 @@
 
   // ---- scenarios / campaign progress -------------------------------------
   // The game tracks unlock per CAMPAIGN CHAIN, not per scenario. Live-RE'd (FUN_00882e50 ->
-  // account.getProperty(chainNode), mTypeID==2, value = furthest scenario cleared in that chain):
+  // account.getProperty(chainNode), mTypeID==2, value = furthest scenario INDEX cleared in that chain):
   // each of the 8 campaigns has a Light and a Dark chain of 5 scenarios = 16 unlock nodes total.
-  // Granting a campaign sets both chain nodes to full progress, which unlocks all its scenarios.
+  // Granting a campaign writes one completion row per (chain node, scenario 1..5, side archetype) on
+  // Easy -- the server rebuilds the flat unlock props + the 0x1054 detail map from these rows.
+  // Light chains take Rebel(0x13886)/Jedi(0x13888) decks, Dark chains Imperial(0x13889)/Sith(0x13887).
+  var LIGHT_ARCHS = [0x13886, 0x13888], DARK_ARCHS = [0x13887, 0x13889];
+  var ARCHS = {
+    0x13886: { name: 'Rebel', side: 0, sh: 'R' },
+    0x13888: { name: 'Jedi', side: 0, sh: 'J' },
+    0x13889: { name: 'Imperial', side: 1, sh: 'I' },
+    0x13887: { name: 'Sith', side: 1, sh: 'S' }
+  };
+  var DIFF_SH = { 1: 'E', 2: 'M', 3: 'H' };
   var CAMPAIGNS = [
     { label: 'Champions of the Force', nodes: [0x157e6, 0x157e7] },
     { label: 'Squadrons Over Corellia', nodes: [0x157ee, 0x157ef] },
@@ -381,14 +412,28 @@
     { label: 'Threat of the Conqueror', nodes: [0x1580d, 0x1580e] },
     { label: 'The Price of Victory', nodes: [0x15813, 0x15814] }
   ];
-  var GRANT_VALUE = 5;                                        // full chain progress = all 5 scenarios cleared
+  var CHAIN_LEN = 5;                                          // scenarios per chain
 
   function renderScenarios() {
     var meta = $('scnMeta'), prog = $('scnProgress'), grant = $('scnGrantList');
     if (!DB.isOpen()) { meta.textContent = 'No database open. Click "Open Account DB".'; prog.innerHTML = ''; grant.innerHTML = ''; return; }
-    var comp = DB.scenarioCompletion(state.acct);            // [{node_id, archetype_id, difficulty}]
-    var valByNode = {};                                      // chain node -> max stored progress value
-    comp.forEach(function (r) { valByNode[r.node_id] = Math.max(valByNode[r.node_id] || 0, r.difficulty); });
+    var comp = DB.scenarioCompletion(state.acct);            // [{node_id, scenario_index, archetype_id, difficulty}]
+    var valByNode = {};                                      // chain node -> furthest scenario index cleared
+    var detByNode = {};                                      // chain node -> {archetype -> set of difficulties}
+    comp.forEach(function (r) {
+      valByNode[r.node_id] = Math.max(valByNode[r.node_id] || 0, r.scenario_index);
+      (detByNode[r.node_id] = detByNode[r.node_id] || {})[r.archetype_id] =
+        (detByNode[r.node_id][r.archetype_id] || {});
+      detByNode[r.node_id][r.archetype_id][r.difficulty] = 1;
+    });
+    function sideDetail(node) {                              // e.g. "R:EM J:E" -- clears per archetype
+      var det = detByNode[node]; if (!det) return '';
+      return Object.keys(det).map(function (a) {
+        var m = ARCHS[a] || { sh: '?' };
+        var ds = Object.keys(det[a]).sort().map(function (d) { return DIFF_SH[d] || d; }).join('');
+        return m.sh + ':' + ds;
+      }).join(' ');
+    }
     function done(c) { return c.nodes.every(function (n) { return valByNode[n]; }); }
     meta.innerHTML = 'Account <b>' + esc(acctName()) + '</b> &nbsp; ' +
       CAMPAIGNS.filter(done).length + ' / ' + CAMPAIGNS.length + ' campaigns unlocked';
@@ -400,7 +445,9 @@
       var row = el('div', 'row');
       row.appendChild(el('span', 'badge t-quest', 'SC'));
       row.appendChild(el('span', 'name', c.label));
-      row.appendChild(el('span', 'tag', 'Light ' + l + '/5 · Dark ' + d + '/5'));
+      var ld = sideDetail(c.nodes[0]), dd = sideDetail(c.nodes[1]);
+      row.appendChild(el('span', 'tag', 'Light ' + l + '/5' + (ld ? ' [' + ld + ']' : '') +
+                                        ' · Dark ' + d + '/5' + (dd ? ' [' + dd + ']' : '')));
       prog.appendChild(row);
     });
     if (!any) prog.appendChild(el('div', 'more', 'No campaign progress yet. Play, or grant a campaign below.'));
@@ -416,15 +463,35 @@
   }
   function scnSelected() { return Array.prototype.map.call(document.querySelectorAll('.scnchk:checked'), function (c) { return parseInt(c.value, 10); }); }
   function scnSetAll(v) { Array.prototype.forEach.call(document.querySelectorAll('.scnchk'), function (c) { c.checked = v; }); }
+  function scnOpts() {
+    function vals(sel) { return Array.prototype.map.call(document.querySelectorAll(sel + ':checked'), function (c) { return parseInt(c.value, 10); }); }
+    return { archs: vals('.scnarch'), diffs: vals('.scndiff') };
+  }
   function grantScenarios() {
     if (!DB.isOpen()) { log('Open a database first.', 'warn'); return; }
     var idxs = scnSelected();
     if (!idxs.length) { log('Tick campaigns to unlock first.', 'warn'); return; }
+    var opts = scnOpts();
+    if (!opts.archs.length) { log('Pick at least one archetype (Rebel/Jedi/Imperial/Sith).', 'warn'); return; }
+    if (!opts.diffs.length) { log('Pick at least one difficulty (Easy/Medium/Hard).', 'warn'); return; }
+    var rows = 0, chains = 0;
     idxs.forEach(function (i) {
-      CAMPAIGNS[i].nodes.forEach(function (n) { DB.grantCompletion(state.acct, n, 0, GRANT_VALUE); });
+      CAMPAIGNS[i].nodes.forEach(function (n, side) {       // nodes[0]=Light chain, nodes[1]=Dark chain
+        var archs = opts.archs.filter(function (a) { return (ARCHS[a] || {}).side === side; });
+        if (!archs.length) return;                          // no archetype of this side selected -> skip chain
+        chains++;
+        for (var idx = 1; idx <= CHAIN_LEN; idx++)
+          archs.forEach(function (a) {
+            opts.diffs.forEach(function (df) { DB.grantCompletion(state.acct, n, idx, a, df); rows++; });
+          });
+      });
     });
+    if (!rows) { log('Nothing granted -- the selected archetypes match none of the ticked chains.', 'warn'); return; }
     markDirty();
-    log('Granted ' + idxs.length + ' campaign(s) complete to ' + acctName() + '. Save to game + relaunch.', 'ok');
+    log('Granted ' + idxs.length + ' campaign(s) (' + chains + ' chain(s), ' +
+        opts.archs.map(function (a) { return ARCHS[a].name; }).join('/') + ' on ' +
+        opts.diffs.map(function (d) { return DIFF_SH[d]; }).join('/') + ', ' + rows + ' clears) to ' +
+        acctName() + '. Save to game + relaunch.', 'ok');
     renderScenarios();
   }
   function resetScenariosAcct() {

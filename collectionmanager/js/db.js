@@ -143,18 +143,28 @@
   function resetCampaign(acct) { if (tableExists('campaign_progress')) run("DELETE FROM campaign_progress WHERE account_id=?", [acct]); }
   function resetAllCampaign() { if (tableExists('campaign_progress')) run("DELETE FROM campaign_progress"); }
 
-  /* ---- structured scenario completion (the state the server turns into account property 0x1054) ---- */
+  /* ---- structured scenario completion (the state the server turns into the login campaign props) ----
+   * v3 schema: one row per cleared (chain node, scenario index 1..5, archetype 0x1388x, difficulty 1..3).
+   * Pre-v3 tables (no scenario_index; the old parse stored junk in the other columns) are recreated empty,
+   * matching the server's own v3 migration. */
   function ensureCompletionTable() {
-    if (!tableExists('scenario_completion'))
-      run("CREATE TABLE IF NOT EXISTS scenario_completion (" +
-          "account_id INTEGER NOT NULL, node_id INTEGER NOT NULL, archetype_id INTEGER NOT NULL, " +
-          "difficulty INTEGER NOT NULL, updated_at TEXT NOT NULL DEFAULT (datetime('now')), " +
-          "PRIMARY KEY(account_id, node_id, archetype_id, difficulty))");
+    if (tableExists('scenario_completion')) {
+      var cols = all('PRAGMA table_info(scenario_completion)').map(function (r) { return r.name; });
+      if (cols.indexOf('scenario_index') >= 0) return;
+      run('DROP TABLE scenario_completion');
+    }
+    run("CREATE TABLE IF NOT EXISTS scenario_completion (" +
+        "account_id INTEGER NOT NULL, node_id INTEGER NOT NULL, scenario_index INTEGER NOT NULL, " +
+        "archetype_id INTEGER NOT NULL, difficulty INTEGER NOT NULL, " +
+        "updated_at TEXT NOT NULL DEFAULT (datetime('now')), " +
+        "PRIMARY KEY(account_id, node_id, scenario_index, archetype_id, difficulty))");
   }
   function scenarioCompletion(acct) {
     if (!tableExists('scenario_completion')) return [];
-    return all("SELECT node_id, archetype_id, difficulty FROM scenario_completion WHERE account_id=? " +
-               "ORDER BY node_id, archetype_id, difficulty", [acct]);
+    var cols = all('PRAGMA table_info(scenario_completion)').map(function (r) { return r.name; });
+    if (cols.indexOf('scenario_index') < 0) return [];   // pre-v3 rows are junk; treated as empty
+    return all("SELECT node_id, scenario_index, archetype_id, difficulty FROM scenario_completion " +
+               "WHERE account_id=? ORDER BY node_id, scenario_index, archetype_id, difficulty", [acct]);
   }
   /* learned scenario-string -> nodeId map (populated server-side by playing a scenario once). */
   function scenarioNodemap() {
@@ -162,10 +172,10 @@
     var m = {}; all("SELECT scenario_id, node_id FROM scenario_nodemap").forEach(function (r) { m[r.scenario_id] = r.node_id; });
     return m;
   }
-  function grantCompletion(acct, nodeId, archId, difficulty) {
+  function grantCompletion(acct, nodeId, scenarioIndex, archId, difficulty) {
     ensureCompletionTable();
-    run("INSERT OR REPLACE INTO scenario_completion(account_id,node_id,archetype_id,difficulty,updated_at) " +
-        "VALUES(?,?,?,?, datetime('now'))", [acct, nodeId, archId, difficulty]);
+    run("INSERT OR REPLACE INTO scenario_completion(account_id,node_id,scenario_index,archetype_id,difficulty,updated_at) " +
+        "VALUES(?,?,?,?,?, datetime('now'))", [acct, nodeId, scenarioIndex, archId, difficulty]);
   }
   function clearCompletion(acct) { if (tableExists('scenario_completion')) run("DELETE FROM scenario_completion WHERE account_id=?", [acct]); }
 
@@ -186,6 +196,12 @@
     run("INSERT INTO collections(account_id,catalog_id,qty) VALUES(?,?,?) " +
         "ON CONFLICT(account_id,catalog_id) DO UPDATE SET qty = qty + excluded.qty", [acct, catId, Math.max(1, qty | 0)]);
   }
+  /* Mythic (rarity 'M') cards are heroic-instance/AI-scenario cards -- players never
+   * own or deck them. Callers use this set to keep them out of packs, grants and decks. */
+  function mythicIds() {
+    if (!tableExists('card_catalog')) return [];
+    return all("SELECT catalog_id AS id FROM card_catalog WHERE rarity='M'").map(function (r) { return r.id; });
+  }
 
   global.DB = {
     open: open, isOpen: isOpen, accounts: accounts,
@@ -193,7 +209,7 @@
     decks: decks, deck: deck, saveDeck: saveDeck, deleteDeck: deleteDeck,
     campaignProgress: campaignProgress, grantScenario: grantScenario, resetCampaign: resetCampaign, resetAllCampaign: resetAllCampaign,
     scenarioCompletion: scenarioCompletion, scenarioNodemap: scenarioNodemap, grantCompletion: grantCompletion, clearCompletion: clearCompletion,
-    cardSets: cardSets, cardsInSet: cardsInSet, addOwned: addOwned,
+    cardSets: cardSets, cardsInSet: cardsInSet, addOwned: addOwned, mythicIds: mythicIds,
     exportBytes: exportBytes
   };
 })(window);

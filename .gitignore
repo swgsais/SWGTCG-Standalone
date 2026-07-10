@@ -16,6 +16,11 @@ __pycache__/
 *.pyc
 *.pyo
 
+# Reverse-engineering working set (~700MB: Ghidra databases, decompiled retail
+# code, debugger captures). Local research material -- never distributed.
+/.re/
+/.claude/ 
+
 # RE / debug capture tooling (not shipped to players)
 Dump Campaign Keys.cmd
 Dump Write Key.cmd

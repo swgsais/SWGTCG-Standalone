@@ -14,7 +14,7 @@ import sqlite3
 import auth
 import config
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 DDL = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -195,18 +195,46 @@ CREATE TABLE IF NOT EXISTS campaign_progress (
     PRIMARY KEY (account_id, cid, item_key)
 );
 
--- Structured scenario completion. This is the REAL save state: on scenario completion the client
--- sends AccountCommand_SetCampaignStatus(415) carrying (nodeId, archetypeId, difficulty). We store
--- one row per (node, archetype, difficulty) cleared, and rebuild account property 0x1054 (an
--- IntValueMap: node -> {archetype -> IntegerList[difficulty]}) inside the GetAccountInfo(297) login
--- reply -- which is what actually drives the campaign tree's completion/unlock state.
+-- Structured scenario completion. This is the REAL save state: on a scenario WIN the client sends
+-- AccountCommand_SetCampaignStatus(415) carrying (chainNodeId 0x157xx, scenarioIndex 1..5 within the
+-- chain (tutorials 1..11), difficulty 1/2/3, archetypeId 0x13886 rebel/0x13887 sith/0x13888 jedi/
+-- 0x13889 imperial) -- byte-verified against the exe writer FUN_006409d0 + live captures. We store one
+-- row per cleared (node, index, archetype, difficulty) and at login rebuild BOTH the flat per-node
+-- unlock property (type-2 int = furthest scenario index) and the 0x1054 detail map
+-- (node -> {scenarioIndex -> {archetypeId -> IntegerList[difficulties]}}) on IntroduceAccount(114).
 CREATE TABLE IF NOT EXISTS scenario_completion (
     account_id  INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-    node_id     INTEGER NOT NULL,              -- 0x157xx campaign/scenario node id (from the 415)
+    node_id     INTEGER NOT NULL,              -- 0x157xx campaign CHAIN node id (from the 415)
+    scenario_index INTEGER NOT NULL,           -- 1..5 scenario within the chain (tutorials 1..11)
     archetype_id INTEGER NOT NULL,             -- 0x13886 rebel/0x13887 sith/0x13888 jedi/0x13889 imperial
     difficulty  INTEGER NOT NULL,              -- 1 easy, 2 medium, 3 hard
     updated_at  TEXT    NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY (account_id, node_id, archetype_id, difficulty)
+    PRIMARY KEY (account_id, node_id, scenario_index, archetype_id, difficulty)
+);
+
+-- Scenario reward-card grants (one per unique win coordinate, per campaign.dat's "Receive one reward
+-- card for winning this scenario with both archetypes on Easy, Medium, or Hard difficulty (6 possible)").
+-- difficulty=0 rows are the "each different archetype" standalone-scenario variant (difficulty-agnostic).
+CREATE TABLE IF NOT EXISTS scenario_rewards (
+    account_id  INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    scenario_id TEXT    NOT NULL,              -- e.g. 'COTF_Scenario01' (from scenario_rewards.json)
+    archetype_id INTEGER NOT NULL,
+    difficulty  INTEGER NOT NULL,              -- 1/2/3, or 0 for the per-archetype variant
+    catalog_id  INTEGER NOT NULL,              -- the reward card granted to collections
+    granted_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (account_id, scenario_id, archetype_id, difficulty)
+);
+
+-- Per-account client preferences delivered via AccountCommand_SetPreferences(118). The 118 propset is
+-- a PARTIAL update (each UI path sends only its own attrs: prefs dialog 0x1005/0x1006/0x1007 avatar,
+-- welcome-seen 0x4c4, campaign writer 0x1054+0x157xx), so we store per-ATTRIBUTE raw ValueData bytes
+-- and replay them on the IntroduceAccount(114) propset (skipping server-rebuilt attrs).
+CREATE TABLE IF NOT EXISTS account_prefs (
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    attr_id    INTEGER NOT NULL,               -- e.g. 0x1007 = settings avatar (String "avatar_NN")
+    value      BLOB    NOT NULL,               -- RAW ValueData bytes exactly as the client sent them
+    updated_at TEXT    NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (account_id, attr_id)
 );
 
 -- Learned scenario-string -> numeric nodeId map (the node ids are load-time ForcedIDs, not stored in
@@ -253,8 +281,16 @@ def init_db(conn):
 def _migrate(conn):
     """Apply forward migrations based on schema_meta.version.
     v1 = base. v2 = home-screen/leaderboard/events/tournaments tables (already created by the
-    IF NOT EXISTS DDL that init_db runs every startup, so v1->v2 only bumps the recorded version)."""
+    IF NOT EXISTS DDL that init_db runs every startup, so v1->v2 only bumps the recorded version).
+    v3 = scenario_completion gains scenario_index (the 415's field order was mis-decoded before v3:
+    scenario index was stored as difficulty, difficulty as archetype -- every pre-v3 row is junk, so
+    the table is recreated empty from the corrected DDL) + scenario_rewards + account_prefs tables."""
     ver = int(conn.execute("SELECT value FROM schema_meta WHERE key = 'version'").fetchone()["value"])
+    if ver < 3:
+        cols = [r["name"] for r in conn.execute("PRAGMA table_info(scenario_completion)")]
+        if cols and "scenario_index" not in cols:
+            conn.execute("DROP TABLE scenario_completion")
+            conn.executescript(DDL)          # recreate with the v3 shape (+ the new v3 tables)
     if ver < SCHEMA_VERSION:
         conn.execute("UPDATE schema_meta SET value = ? WHERE key = 'version'", (str(SCHEMA_VERSION),))
         conn.commit()
@@ -320,22 +356,62 @@ def load_campaign_frames(conn, account_id):
     return [(r["cid"], r["item_key"], bytes(r["payload"])) for r in rows]
 
 
-# ---- structured scenario completion (drives account property 0x1054) ----
-def record_scenario_completion(conn, account_id, node_id, archetype_id, difficulty):
-    """Mark one (node, archetype, difficulty) cleared. Idempotent (PK)."""
-    conn.execute(
-        "INSERT OR REPLACE INTO scenario_completion(account_id, node_id, archetype_id, difficulty, updated_at) "
-        "VALUES (?,?,?,?, datetime('now'))", (account_id, node_id, archetype_id, difficulty))
+# ---- structured scenario completion (drives the flat unlock props + property 0x1054) ----
+def record_scenario_completion(conn, account_id, node_id, scenario_index, archetype_id, difficulty):
+    """Mark one (node, index, archetype, difficulty) cleared. Returns True if this is a NEW
+    completion (first win on that exact coordinate), False if it was already recorded."""
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO scenario_completion"
+        "(account_id, node_id, scenario_index, archetype_id, difficulty, updated_at) "
+        "VALUES (?,?,?,?,?, datetime('now'))",
+        (account_id, node_id, scenario_index, archetype_id, difficulty))
     conn.commit()
+    return cur.rowcount > 0
 
 
 def load_scenario_completion(conn, account_id):
-    """-> {node_id: {archetype_id: [difficulties...] }} for building property 0x1054."""
+    """-> {node_id: {scenario_index: {archetype_id: [difficulties...]}}} for the login props."""
     out = {}
-    for r in conn.execute("SELECT node_id, archetype_id, difficulty FROM scenario_completion "
-                          "WHERE account_id=? ORDER BY node_id, archetype_id, difficulty", (account_id,)):
-        out.setdefault(r["node_id"], {}).setdefault(r["archetype_id"], []).append(r["difficulty"])
+    for r in conn.execute("SELECT node_id, scenario_index, archetype_id, difficulty FROM scenario_completion "
+                          "WHERE account_id=? ORDER BY node_id, scenario_index, archetype_id, difficulty",
+                          (account_id,)):
+        out.setdefault(r["node_id"], {}).setdefault(r["scenario_index"], {}) \
+           .setdefault(r["archetype_id"], []).append(r["difficulty"])
     return out
+
+
+# ---- scenario reward-card grants ----
+def record_scenario_reward(conn, account_id, scenario_id, archetype_id, difficulty, catalog_id):
+    """Grant a scenario reward card once per unique (scenario, archetype, difficulty) win.
+    Returns True (and adds the card to the collection) only on the first claim."""
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO scenario_rewards"
+        "(account_id, scenario_id, archetype_id, difficulty, catalog_id, granted_at) "
+        "VALUES (?,?,?,?,?, datetime('now'))",
+        (account_id, scenario_id, archetype_id, difficulty, catalog_id))
+    if cur.rowcount > 0:
+        add_to_collection(conn, account_id, catalog_id, 1)
+        return True
+    conn.commit()
+    return False
+
+
+# ---- per-account client preferences (AccountCommand_SetPreferences 118) ----
+def save_account_pref(conn, account_id, attr_id, value):
+    """Upsert one preference attribute's RAW ValueData bytes (latest-wins per attr)."""
+    conn.execute(
+        "INSERT INTO account_prefs(account_id, attr_id, value, updated_at) "
+        "VALUES (?,?,?, datetime('now')) "
+        "ON CONFLICT(account_id, attr_id) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+        (account_id, attr_id, sqlite3.Binary(value)))
+    conn.commit()
+
+
+def load_account_prefs(conn, account_id):
+    """-> [(attr_id, raw_valuedata_bytes), ...] for replay on the IntroduceAccount(114) propset."""
+    return [(r["attr_id"], bytes(r["value"]))
+            for r in conn.execute("SELECT attr_id, value FROM account_prefs WHERE account_id=? "
+                                  "ORDER BY attr_id", (account_id,))]
 
 
 def clear_scenario_completion(conn, account_id, node_id=None):
@@ -745,7 +821,8 @@ def grant_pack(conn, account_id, n=15, set_num=None, seed=None):
     drawn from booster set `set_num` (None = all sets). Returns [(catalog_id, name), ...] granted (empty if the
     set has no collectible cards). Deterministic if seed given (with replacement -- a booster can dupe)."""
     import random
-    q = "SELECT catalog_id, name FROM card_catalog WHERE is_card=1 AND type IS NOT NULL"
+    # Mythic ('M') cards are heroic-instance/AI-scenario cards -- never player-awardable.
+    q = "SELECT catalog_id, name FROM card_catalog WHERE is_card=1 AND type IS NOT NULL AND COALESCE(rarity,'') <> 'M'"
     args = []
     if set_num is not None:
         q += " AND set_num=?"; args.append(set_num)

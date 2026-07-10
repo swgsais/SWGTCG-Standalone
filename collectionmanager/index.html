@@ -108,15 +108,29 @@
   <div class="cardlist" id="scnProgress" style="max-height:180px"></div>
 
   <div class="banner" style="margin:12px 0">
-    The game unlocks scenarios per <b>campaign</b> (a Light and a Dark chain of 5 each). Tick a
-    campaign and <b>Grant complete</b> to unlock all its scenarios, or <b>Reset</b> to clear
-    progress. Then <b>Save to game</b> and relaunch to apply.
+    The game unlocks scenarios per <b>campaign</b> (a Light and a Dark chain of 5 each), and records
+    each clear per <b>archetype</b> and <b>difficulty</b>. Tick campaigns below, pick which clear
+    types to grant, then <b>Grant selected</b> (or <b>Reset</b> to clear progress). Then
+    <b>Save to game</b> and relaunch to apply. Light chains are played with Rebel/Jedi decks,
+    Dark chains with Imperial/Sith.
+  </div>
+  <div class="toolbar" id="scnOptions">
+    <span class="meta">Light:</span>
+    <label><input type="checkbox" class="scnarch" value="80006" checked> Rebel</label>
+    <label><input type="checkbox" class="scnarch" value="80008" checked> Jedi</label>
+    <span class="meta" style="margin-left:12px">Dark:</span>
+    <label><input type="checkbox" class="scnarch" value="80009" checked> Imperial</label>
+    <label><input type="checkbox" class="scnarch" value="80007" checked> Sith</label>
+    <span class="meta" style="margin-left:12px">Difficulty:</span>
+    <label><input type="checkbox" class="scndiff" value="1" checked> Easy</label>
+    <label><input type="checkbox" class="scndiff" value="2"> Medium</label>
+    <label><input type="checkbox" class="scndiff" value="3"> Hard</label>
   </div>
   <div class="toolbar">
     <button id="scnSelAll">Select all</button>
     <button id="scnSelNone">Clear selection</button>
     <span class="spacer"></span>
-    <button id="scnGrant" class="primary">Grant complete</button>
+    <button id="scnGrant" class="primary">Grant selected</button>
   </div>
   <div class="cardlist" id="scnGrantList"></div>
 </section>
