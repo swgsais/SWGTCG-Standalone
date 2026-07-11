@@ -61,6 +61,14 @@ PATCHES = [
      bytes.fromhex("cccccccccccccccccc"), bytes.fromhex("e876cfffff83c008c3"), "ctrl"),
     ("board: de-fang bounce (je returnToMenu->NOP)", 0x007f40ea,
      bytes.fromhex("0f84ba000000"),     bytes.fromhex("909090909090"), "board"),
+    # --- group "keepalive" : the online board-show closes the "matchDialog" top-level (QWidget::close
+    # @0x832ea0) right before switchScreen(0xB). When the board later reverts (SOG readiness fails, opponent
+    # unresolved) the visible-top-level count hits 0 and Qt's quitOnLastWindowClosed makes exec() return ->
+    # the client cleanly EXITS. NOP the close so matchDialog stays visible -> count never hits 0 -> no auto-quit.
+    # (Safety net: keeps the client alive so the board state is observable while the opponent-seat / SOG
+    # participant graph is finished. See NETWORKED-PLAY-PLAN.md M2 live-path map.)
+    ("keepalive: don't close matchDialog (no auto-quit)", 0x00832ea0,
+     bytes.fromhex("ff15808d9c00"),     bytes.fromhex("909090909090"), "keepalive"),
 ]
 
 
