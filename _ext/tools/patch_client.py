@@ -69,6 +69,23 @@ PATCHES = [
     # participant graph is finished. See NETWORKED-PLAY-PLAN.md M2 live-path map.)
     ("keepalive: don't close matchDialog (no auto-quit)", 0x00832ea0,
      bytes.fromhex("ff15808d9c00"),     bytes.fromhex("909090909090"), "keepalive"),
+    # --- group "resolve" : global self-resolve. FUN_004cff00 reads game+0x139 (the am-I-authoritative flag,
+    # =0 online). EVERY StartOfGame per-player ACK barrier (EQStartingLandscapeState 0x65a040/0x65a530, deal,
+    # mulligan, ...) fills its response map ONLY on the 139==1 path, so online (139==0) they deadlock. Force the
+    # reader to always return 1 so every barrier self-resolves locally (mirrored-deterministic; no wire ack).
+    # Completes the WHOLE SOG chain 4->5->6->7 (workflow m2-sog-syncda RANK 1). RISK: may auto-play turns to
+    # game-over (game+0x139 also gates turn self-resolve) -> if so, use the surgical "sog" NOPs + a SOG->Turn-1
+    # toggle instead. Supersedes group "sog".
+    ("resolve: game+0x139 reader -> always 1 (self-resolve)", 0x004cff00,
+     bytes.fromhex("8a8139010000c3"), bytes.fromhex("b001c390909090"), "resolve"),
+    # --- group "recorder" : NETWORKED barrier fill. EQStartingLandscapeState's inbound-response recorder
+    # (FUN_0065a200) is game+0x139-gated at 0x65a24b (je 0x65a2bc when 139==0) -> discards received responses
+    # online, so the per-player ACK barrier can only fill via the local self-resolve (group "sog" P1), which
+    # makes each engine pick its OWN mission -> the two engines DIVERGE (split-seat desync + revert). NOP the je
+    # so the recorder records the REAL relayed CardSelected(60) from BOTH players -> both engines fill the barrier
+    # from identical network data -> no desync. Use INSTEAD of "sog" P1 for networked mission-pick.
+    ("recorder: fill SOG barrier from relayed 60 (net)", 0x0065a24b,
+     bytes.fromhex("746f"),             bytes.fromhex("9090"),         "recorder"),
 ]
 
 
