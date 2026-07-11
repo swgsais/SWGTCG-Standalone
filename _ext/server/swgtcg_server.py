@@ -252,18 +252,36 @@ def _reward_for(node, index):
             log(16783, 0, "scenario_rewards.json load FAILED: %s (no reward grants this run)" % e)
     return _REWARD_MAP.get((node, index))
 
+# Foil / holographic printing = base catalog id + 300000 (live-RE'd from the EXE, SWGTCGGame.exe base
+# 0x400000): isFoil FUN_00445e90 flags any productId whose (pid % 1000000)//100000 digit is 3 (foil of a
+# base printing) or 4 (foil of an alt-art printing); the archetype DB getter FUN_00445590 has no storage.dat
+# row for a foil id -- it SYNTHESIZES the foil archetype from the base record at pid-300000. So a foil id
+# needs no catalog/DB entry: the client fabricates it at load, exactly how the 1,703 +300000 ids in the
+# shipped retail .cln collections resolve. collections.catalog_id has no FK, so we store/deliver it raw.
+FOIL_ID_OFFSET = 300000
+
 def grant_scenario_reward(dbc, acct, node, index, diff, arch):
     """Grant the scenario's reward card for a live 415 win, once per unique win coordinate.
+    Retail rule (campaign.dat blurbs, confirmed against the shipped .cln collections): scenarios flagged
+    foil_on_hard grant the HOLOGRAPHIC printing (base catalog id + 300000) on Hard (diff==3) and the normal
+    printing on Easy/Medium; a player can earn both (uniqueness is per scenario+archetype+difficulty). The
+    difficulty-agnostic promo scenarios (foil_on_hard=false, forced diff 2) always grant the normal promo.
     Returns (catalog_id, reward_name) when a new card was granted, else None."""
     e = _reward_for(node, index)
     if not e or arch is None:
         return None
-    catid = e.get("foil_id") or e.get("normal_id")
+    # normal_id/foil_id are never both set; on "both archetypes" entries only foil_id is populated and it
+    # holds the single BASE loot-card id (there is no separate non-foil catalog row). Pick whichever is set.
+    catid = e.get("normal_id") or e.get("foil_id")
     if not catid:
         return None
+    foil = bool(e.get("foil_on_hard")) and diff == 3
+    if foil:
+        catid += FOIL_ID_OFFSET
     dkey = 0 if e.get("phrasing") == "each different archetype" else diff
     if dbmod.record_scenario_reward(dbc, acct, e["scenario_id"], arch, dkey, catid):
-        return catid, e.get("reward_name", "?")
+        name = e.get("reward_name", "?")
+        return catid, (name + " (foil)") if foil else name
     return None
 
 
@@ -443,17 +461,30 @@ def dispatch(conn, n, payload, acct=None, dbc=None):
         # such preceding Join, so the rebuild used a stale/invalid current group -> Create wouldn't open. FIX: mimic
         # login -- send a self-Join(grp=100) (Join run: account==local && findGroup(100)!=0 -> set-current-group
         # FUN_00468d20) THEN ChangeLobbyDisplay(100). CASUAL_CAT=100 is registered at login so findGroup resolves.
-        if PUSH_TOURNAMENTS and jf3 == 1 and grp == 2:
-            conn.sendall(frame(_env(92, [1, 1, 1]) + enc_int(acct) + enc_int(CASUAL_CAT) + enc_int(0)))
-            conn.sendall(build_changelobbydisplay(CASUAL_CAT))
-            log(16783, n, "-> casual button: self-Join(grp=%d)+ChangeLobbyDisplay (mimic login, Create-safe)" % CASUAL_CAT)
-            return
-        # TOURNAMENT tab (grp=5): navigate to the hardcoded display-5 screen + push its gid=5 group/299/293 on
-        # demand (DEFERRED off casual logins so casual Create keeps working).
-        if PUSH_TOURNAMENTS and jf3 == 1 and grp == TOURNEY_LOBBYTYPE:
-            _push_tourney_lobby(conn, dbc, acct, 16783, n)   # gid=5 group + 299/293 on demand
-            conn.sendall(build_changelobbydisplay(TOURNEY_LOBBYTYPE))
-            log(16783, n, "-> tab nav: Join(grp=%d field3=1) -> ChangeLobbyDisplay(display=%d)" % (grp, TOURNEY_LOBBYTYPE))
+        # CATEGORY-TAB NAVIGATION (field3==1): the menu buttons don't navigate locally -- the server answers
+        # with the matching screen push. Un-gated (was behind PUSH_TOURNAMENTS): clicking a menu button should
+        # always open its screen. field3==2 = a real match join (handled below).
+        if jf3 == 1:
+            if grp == 2:                        # Casual Games button
+                # self-Join(100) FIRST (sets the client's current group) THEN ChangeLobbyDisplay(100), so the
+                # 291 rebuild uses a valid current group and the casual Create dialog still opens (RE out/exe).
+                conn.sendall(frame(_env(92, [1, 1, 1]) + enc_int(acct) + enc_int(CASUAL_CAT) + enc_int(0)))
+                conn.sendall(build_changelobbydisplay(CASUAL_CAT))
+                log(16783, n, "-> Casual tab: self-Join(grp=%d)+ChangeLobbyDisplay(%d) (Create-safe)" % (CASUAL_CAT, CASUAL_CAT))
+                return
+            if grp == TOURNEY_LOBBYTYPE:         # Tournaments button (display=5 = client-hardcoded tournament screen)
+                _push_tourney_lobby(conn, dbc, acct, 16783, n)   # registers gid=5 group (+ 299/293 if any tourneys)
+                conn.sendall(build_changelobbydisplay(TOURNEY_LOBBYTYPE))
+                log(16783, n, "-> Tournaments tab: gid=%d group + ChangeLobbyDisplay(display=%d)" % (TOURNEY_LOBBYTYPE, TOURNEY_LOBBYTYPE))
+                return
+            if grp == TRADE_LOBBYTYPE:          # Trade button (grp=3, LIVE-confirmed) -> trade lobby (display=3)
+                _push_trade_lobby(conn, acct, 16783, n)
+                conn.sendall(build_changelobbydisplay(TRADE_LOBBYTYPE))
+                log(16783, n, "-> Trade tab: gid=%d group + SetTradeAllowed + ChangeLobbyDisplay(display=%d)" % (TRADE_LOBBYTYPE, TRADE_LOBBYTYPE))
+                return
+            # Any OTHER category tab is not wired yet. LOG the gid so it can be mapped, and do NOT navigate --
+            # pushing an unknown/unregistered display could crash the client.
+            log(16783, n, "-> UNMAPPED category tab: Join(92) grp=%s field3=1 acct=%s  (report this gid to wire the button)" % (grp, acct))
             return
         with _clients_lock:
             owned = MATCHES.get(CONN_MATCH.get(acct))
@@ -611,23 +642,26 @@ def dispatch(conn, n, payload, acct=None, dbc=None):
         log(16783, n, "RECV ChangeLobbyDisplay(291) REQUEST acct=%s display=%s" % (acct, req_disp))
         # display=5 now renders (the gid=5 key fix); still gated behind ANSWER_TOURNAMENT_NAV so the answer
         # only fires when explicitly enabled. Casual (display=2 -> 100) is ungated (always safe).
-        if ANSWER_TOURNAMENT_NAV and req_disp == 5:
-            # answer the Tournaments button. ORDER MATTERS: the tournament STATE (SetTournament + the
-            # container-allocating UpdateTournament) must reach the client BEFORE the ChangeLobbyDisplay that
-            # triggers the screen build, else the model walks a null pairings list -> crash (workflow w6cvp1oil).
-            try:
-                for t in dbmod.list_tournaments(dbc, states=("open", "locked", "running")):
-                    conn.sendall(build_settournament(t["id"], round=t.get("round", 0), timer=0, group_id=TOURNEY_LOBBYTYPE))
-                    conn.sendall(build_updatetournament(TOURNEY_LOBBYTYPE, t["id"], pairings=(),
-                                                        round=t.get("round", 0), substate=0))
-            except Exception:
-                pass
+        if req_disp == 2:                      # Casual button
+            # self-Join(100) before the nav so the 291 rebuild has a valid current group (Create-safe), matching
+            # the cid==92 casual-tab path above.
+            conn.sendall(frame(_env(92, [1, 1, 1]) + enc_int(acct) + enc_int(CASUAL_CAT) + enc_int(0)))
+            conn.sendall(build_changelobbydisplay(CASUAL_CAT))
+            log(16783, n, "-> answered Casual button: self-Join(%d)+ChangeLobbyDisplay(291, display=%d)" % (CASUAL_CAT, CASUAL_CAT))
+        elif req_disp == 5:                    # Tournaments button (display=5 = client-hardcoded tournament screen)
+            # _push_tourney_lobby registers the gid=5 group + SetTournament(299)/UpdateTournament(293) BEFORE the
+            # nav, so the screen resolves its group and its model has a valid (possibly empty) list to walk.
+            _push_tourney_lobby(conn, dbc, acct, 16783, n)
             time.sleep(0.05)
             conn.sendall(build_changelobbydisplay(5))
-            log(16783, n, "-> answered Tournaments button: SetTournament(299)+UpdateTournament(293) then ChangeLobbyDisplay(291,5)")
-        elif req_disp == 2:                # Casual button -> back to the casual category (gid 100)
-            conn.sendall(build_changelobbydisplay(CASUAL_CAT))
-            log(16783, n, "-> answered Casual button: ChangeLobbyDisplay(291, display=%d)" % CASUAL_CAT)
+            log(16783, n, "-> answered Tournaments button: gid=5 group + ChangeLobbyDisplay(291, display=5)")
+        elif req_disp == 3:                    # Trade button (display=3) -> trade lobby
+            _push_trade_lobby(conn, acct, 16783, n)
+            time.sleep(0.05)
+            conn.sendall(build_changelobbydisplay(3))
+            log(16783, n, "-> answered Trade button: gid=3 group + ChangeLobbyDisplay(291, display=3)")
+        elif req_disp is not None:             # any other requested display -- not wired yet; log to map it
+            log(16783, n, "-> UNMAPPED ChangeLobbyDisplay REQUEST display=%s acct=%s  (report this to wire the button)" % (req_disp, acct))
         return
 
     if cid == 415:                         # ★ SCENARIO WIN report (AccountCommand_SetCampaignStatus).
@@ -729,6 +763,7 @@ CONN_MATCH = {}         # acct -> mid the account is currently in
 TOURNEY_GROUP_SENT = set()  # accts we've pushed the tournament-lobby group (gid=5) to this session -- DEFERRED
                         # off casual logins (the type-5 group + SetTournament manager state break the casual
                         # Create dialog), pushed only at a tournaments login or on the Tournaments-tab click.
+TRADE_GROUP_SENT = set()    # accts we've pushed the trade-lobby group (gid=3) to this session (Trade tab, on-demand)
 _next_match = 6000      # server-assigned UNIQUE mids, high range no client invents (capture: client uses gid=0)
 GAME_ID = 200           # client-side Game id LaunchGame creates / SendSerializedGame(262) reconstructs
 
@@ -778,11 +813,21 @@ PUSH_LEADERBOARD = os.environ.get("SWGTCG_PUSH_LEADERBOARD", "0") != "0"
 # SWLobbyTranslator) -- OFF by default, sweep SWGTCG_TOURNEY_LOBBYTYPE live.
 PUSH_TOURNAMENTS = os.environ.get("SWGTCG_PUSH_TOURNAMENTS", "0") != "0"
 TOURNEY_LOBBYTYPE = int(os.environ.get("SWGTCG_TOURNEY_LOBBYTYPE", "5"))   # candidate; confirm live
-# Which lobby screen the client lands on at login: "casual" (display=100, default) or "tournaments"
-# (display=5 -> the tournament lobby screen, RE agent a09f084a). The Casual/Tournament BUTTONS send a
-# ChangeLobbyDisplay(291) request the server answers (dispatch cid==291); this flag is the login default +
-# a guaranteed proof the tournament screen renders without depending on the button gate.
-LOGIN_SCREEN = os.environ.get("SWGTCG_LOGIN_SCREEN", "casual")
+# Which screen the client lands on at login:
+#   "home"        (DEFAULT) -- the Home hub = WAMapScreen (switchScreen screen-id 2: News + MOTD panes + the
+#                 left-edge Navigator). ChangeLobbyDisplay CANNOT reach it (event 0x46 is hard-wired to
+#                 switchScreen(3, displayId) = the cat-3 room-lists). Home = switchScreen(2), which the client's
+#                 nav handler (standalone FUN_00831ae0 / DLL FUN_10432770) fires ONLY for the special group id 1
+#                 (`if groupId == 1: switchScreen(2)`). So the login handler registers a gid=1 type-1 group and
+#                 self-Joins the local account to it -- the membership-add drives switchScreen(2) -> Home and
+#                 dismisses the login splash. PLAY -> Tutorials / Scenarios / Skirmish work from the Navigator.
+#   "casual"      -- push ChangeLobbyDisplay(291, display=100) => the Casual Games room-list (screen 3).
+#   "tournaments" -- push ChangeLobbyDisplay(291, display=5)   => the tournament lobby screen (RE a09f084a).
+# The Casual / Tournament BUTTONS still send their own ChangeLobbyDisplay(291) request the server answers
+# (dispatch cid==291), so casual / tournament play stays reachable from Home via the Navigator regardless.
+# The "home" switchScreen(2) lever is RE'd (agent a9abd715) but not yet live-validated; if it misbehaves
+# (client stays on the splash, or bounces), set SWGTCG_LOGIN_SCREEN=casual to fall back to the proven push.
+LOGIN_SCREEN = os.environ.get("SWGTCG_LOGIN_SCREEN", "home")
 # EXPERIMENTAL + currently UNSAFE: answering a Tournaments-button request with ChangeLobbyDisplay(291,
 # display=5) CRASHES the client -- the tournament lobby screen build needs data we don't yet supply (RE in
 # progress). OFF by default; SWGTCG_LOGIN_SCREEN=tournaments has the SAME crash (both build display=5).
@@ -1333,8 +1378,17 @@ def _deck58_launch(n, mid, members, conns):
             # @+0x25F25E (DLL live: 58 arrived=0, deal crashed). SWGTCG_DECK58_58_FIRST=0 reverts to 58-after-67.
             _58_first = os.environ.get("SWGTCG_DECK58_58_FIRST", "1") != "0"
             if _58_first: _send_58s()
+            # EQ SetupGame (SWGTCG_EQ_SETUP=1): pass the 80007 position/team maps so EQGame::setup calls
+            # setPosition and each EQPlayer's mPosition is seated (0/1) instead of the -100 default that asserts
+            # (eqplayer.cpp:376). On the FinalLive DLL the 80007 command was DROPPED by the receive path (hence
+            # the old base-67 + cdb assert-suppress); the STANDALONE exe registers 80007 in its command factory,
+            # so this is the standalone's server-side seat fix. Base 67 (maps=None) is the fallback.
+            _eqsetup = os.environ.get("SWGTCG_EQ_SETUP", "0") != "0"
+            _posmap  = {1: 0, 2: 1} if _eqsetup else None
+            _teammap = {1: 0, 2: 1} if _eqsetup else None
             c.sendall(build_gamecommand_setupgame(game_id=launch_gid, match_id=launch_gid,   # 3. 67 seat + kick advanceTurn
-                player_count=2, account_ids=(1, 2), player_order=(1, 2), my_player_id=_mypid))
+                player_count=2, account_ids=(1, 2), player_order=(1, 2), my_player_id=_mypid,
+                position_map=_posmap, team_map=_teammap))
             time.sleep(0.2)
             if not _58_first: _send_58s()
             if late116:
@@ -1356,18 +1410,34 @@ def _deck58_launch(n, mid, members, conns):
     if os.environ.get("SWGTCG_DECK58_PUMP", "1") != "0":
         _rep = int(os.environ.get("SWGTCG_DECK58_PUMP_N", "40"))
         _iv = float(os.environ.get("SWGTCG_DECK58_PUMP_IV", "0.25"))
+        # STARTING-MISSION auto-pick (SWGTCG_DECK58_MISSION): originate CardSelected(60) for BOTH players to
+        # EACH client during the phase-4/5 window (child created, not yet advanced) so EQStartingLandscapeState's
+        # per-player selected-card map fills and SOG advances past phase 5. card_id = playerId*1e6 + slot
+        # (starter decks: 1000060/2000060). WINDOWED (iters _mstart.._mend) to avoid a 60 after the state
+        # advances past mission-pick, which would THROW inside Game::cardSelected. Sweep knobs if the timing is off.
+        _mission = os.environ.get("SWGTCG_DECK58_MISSION", "1") != "0"
+        _mstart  = int(os.environ.get("SWGTCG_DECK58_MISSION_START", "0"))   # from the very first pump tick
+        _mend    = int(os.environ.get("SWGTCG_DECK58_MISSION_END", "20"))    # ...through ~5s, to cover the whole park
+        _mslot   = int(os.environ.get("SWGTCG_DECK58_MISSION_SLOT", "60"))
         def _pump(_conns=conns, _gid=launch_gid, _rep=_rep, _iv=_iv):
-            for _ in range(_rep):
+            for _i in range(_rep):
                 for _a, _c in _conns:
                     if not _c: continue
                     try:
                         for _pid in (1, 2):
                             _c.sendall(build_gamecommand_readyforstartofgame(player_account=_pid, game_id=_gid))
-                    except Exception:
+                        if _mission and _mstart <= _i <= _mend:
+                            for _pid in (1, 2):   # both players' picks to THIS client (mirrored engine needs both)
+                                _c.sendall(build_gamecommand_cardselected(player_id=_pid, card_id=_pid * 1000000 + _mslot, game_id=_gid))
+                            if _i == _mstart:
+                                log(16783, 0, "-> [DECK58] mission-pick(60) SENT to acct=%s (P1 card=%d, P2 card=%d)" % (_a, 1000000 + _mslot, 2000000 + _mslot))
+                    except Exception as _pe:
+                        log(16783, 0, "-> [DECK58] pump/mission send stopped for acct=%s: %s" % (_a, _pe))
                         return
                 time.sleep(_iv)
         threading.Thread(target=_pump, daemon=True).start()
-        log(16783, n, "-> [DECK58] SM pump started (%dx 117x2 @ %ss) to tick StartOfGame through the deal" % (_rep, _iv))
+        log(16783, n, "-> [DECK58] SM pump started (%dx 117x2 @ %ss); mission-pick(60) iters %d..%d slot=%d (%s)"
+            % (_rep, _iv, _mstart, _mend, _mslot, "on" if _mission else "off"))
     log(16783, n, "-> LAUNCH(deck58) mid=%s members=%s gid=%d: option-2 mirrored-engine, NO 262 blob" % (mid, members, launch_gid))
 
 
@@ -1628,19 +1698,59 @@ def _push_tourney_lobby(conn, dbc, acct, port=16783, n=0):
         tourneys = dbmod.list_tournaments(dbc, states=("open", "locked", "running"))
     except Exception as e:
         log(port, n, "-> tournament load FAILED: %s" % e)
-        return
-    if not tourneys:
-        return
+        tourneys = []
+    # ALWAYS register the gid=5 group BEFORE the caller's ChangeLobbyDisplay(5): the display-5 screen resolves
+    # its group via findGroup(5), so an unregistered gid=5 makes the screen build deref null. (Previously an
+    # empty tournament list early-returned here and skipped the group push, yet the caller still sent the nav
+    # -> null screen build. Fix per .re/MULTIPLAYER-ROADMAP.md.)
     if acct not in TOURNEY_GROUP_SENT:
         conn.sendall(build_addgroups([(0, TOURNEY_LOBBYTYPE, TOURNEY_LOBBYTYPE)]))
         TOURNEY_GROUP_SENT.add(acct)
         time.sleep(0.05)   # let the client register the group before 299/293 reference it
         log(port, n, "-> AddGroups(94) tournament-lobby group gid=%d type=%d" % (TOURNEY_LOBBYTYPE, TOURNEY_LOBBYTYPE))
+    if not tourneys:
+        log(port, n, "-> tournament lobby: gid=%d group registered, no open tournaments (empty Queue/Started tables)" % TOURNEY_LOBBYTYPE)
+        return
     for t in tourneys:
         conn.sendall(build_settournament(t["id"], round=t.get("round", 0), timer=0, group_id=TOURNEY_LOBBYTYPE))
         conn.sendall(build_updatetournament(TOURNEY_LOBBYTYPE, t["id"], pairings=(), round=t.get("round", 0), substate=0))
     log(port, n, "-> SetTournament(299)+UpdateTournament(293) gid=%d x%d: %s"
         % (TOURNEY_LOBBYTYPE, len(tourneys), [t["name"] for t in tourneys]))
+
+
+# ---- Trade lobby (Trade menu button -> goToTradeLobby; RE agent a6217b0, LIVE-confirmed grp=3) ------------
+# The Trade menu button is a category-tab nav exactly like Casual/Tournaments: the client sends
+# Join(92, grp=3, field3=1) and navigates ONLY when the server answers ChangeLobbyDisplay(291, display=3) ->
+# switchScreen(3, 3) -> the GENERIC WALobbyScreen (screen factory case-3 else branch; there is NO hardcoded
+# display==3 branch). NOTE: this is the trade LOBBY (browse for a partner), NOT the screen-6 WATradeScreen
+# trade SESSION -- that is reached later via TradeCommand_AcceptTradeRequest(148). Prereqs mirror casual:
+# a registered group whose GID == the display id (so findGroup(3) resolves), plus SetTradeAllowed(348) = the
+# list of accounts this player may trade with (populates the trade-lobby rows).
+TRADE_LOBBYTYPE = int(os.environ.get("SWGTCG_TRADE_LOBBYTYPE", "3"))   # trade category-tab gid (live: grp=3)
+
+def build_settradeallowed(acct, peers):
+    """TradeCommand_SetTradeAllowed(348): baseInt + acct + int(0) + int N + N*(peerAcct, allowed=1).
+    peers = [peerAcct, ...] -- the currently-online accounts this player may trade with."""
+    body = _env(348, [1, 1, 1]) + enc_int(acct) + enc_int(0) + enc_int(len(peers))
+    for p in peers:
+        body += enc_int(p) + enc_int(1)
+    return frame(body)
+
+def _push_trade_lobby(conn, acct, port=16783, n=0):
+    """Open the trade LOBBY: register the gid=3 group (once/session, idempotent) so the display-3 screen
+    resolves it, then push SetTradeAllowed(348) with the online peers. The caller sends ChangeLobbyDisplay(3)."""
+    if acct not in TRADE_GROUP_SENT:
+        conn.sendall(build_addgroups([(0, TRADE_LOBBYTYPE, 1)]))   # contain 0, GID == display, type-1 room-list
+        TRADE_GROUP_SENT.add(acct)
+        time.sleep(0.05)   # let the client register the group before the 348/nav reference it
+        log(port, n, "-> AddGroups(94) trade-lobby group gid=%d type=1" % TRADE_LOBBYTYPE)
+    try:
+        with _clients_lock:
+            peers = [a for a in LOBBY.keys() if a != acct]
+    except Exception:
+        peers = []
+    conn.sendall(build_settradeallowed(acct, peers))
+    log(port, n, "-> SetTradeAllowed(348) acct=%d peers=%s (trade-lobby list)" % (acct, peers))
 
 def build_starttournamentround(tournament_id, round):
     """LobbyCommand_StartTournamentRound(300): baseInt + int tournamentID + int round."""
@@ -1695,15 +1805,18 @@ def build_gamecommand_setupgame(game_id=200, server_id=1, player_count=2,
     V = version
     # ★ The EQ variant (classid 80007 = EQGameCommand_SetupGame) is a SEPARATE class from base
     # GameCommand_SetupGame (67). Only the EQ execute FUN_0063b380 copies the position/team maps into the game;
-    # classid 67 -> base execute FUN_0050af90 (no maps). So to carry the maps we must send the EQ classid as the
-    # OUTERMOST framing id -> the client builds EQGameCommand_SetupGame -> its readFrom FUN_0063b050 (1 extra
-    # begin, prepended) reads the maps at ver>10. Envelope depth: EQ(80007) -> SetupGame(67) -> GameCommand(67)
-    # -> Serializable(67) = 4 (classid,version) pairs; base = the last 3. eq_version (pair1) gates the maps.
+    # classid 67 -> base execute FUN_0050af90 (no maps). So to carry the maps we send the EQ classid as the
+    # framing id and the readFrom EQGameCommand_SetupGame::readFrom FUN_0063b050 (1 EQ begin, then base
+    # FUN_0050b6b0's 3 begins) reads the maps at ver>10. CRITICAL (LIVE-confirmed on the standalone, wa_error
+    # "Wanted classID 80007, but got 67"): begin() checks the object's LEAF classid at EVERY level -- exactly
+    # like base SetupGame frames as (67,67,67) and Join as (92,92,92) -- so an EQGameCommand_SetupGame object
+    # wants 80007 at ALL FOUR (classid,version) levels, NOT 80007 then three 67s. eq_version (level 1) gates
+    # the maps; the base levels keep their own versions (V,1,1).
     eq = (position_map is not None) or (team_map is not None)
     eq_version = 11
     if eq:
-        env = ((enc_int(80007) + enc_int(eq_version)) + (enc_int(67) + enc_int(V)) +
-               (enc_int(67) + enc_int(1)) + (enc_int(67) + enc_int(1)))
+        env = ((enc_int(80007) + enc_int(eq_version)) + (enc_int(80007) + enc_int(V)) +
+               (enc_int(80007) + enc_int(1)) + (enc_int(80007) + enc_int(1)))
     else:
         env = ((enc_int(67) + enc_int(V)) + (enc_int(67) + enc_int(1)) + (enc_int(67) + enc_int(1)))
     def vec_int(xs):
@@ -1740,6 +1853,29 @@ def build_gamecommand_setupgame(game_id=200, server_id=1, player_count=2,
         if eq_version > 11: body += enc_int(0)       # EQ matchStructure scalar (cmd+0x98), eq_ver>11 only
         body += enc_intmap(position_map)             # cmd+0x80 -> game+0x3e8 (accountId -> seat)
         body += enc_intmap(team_map)                 # cmd+0x8c -> game+0x3f4 (accountId -> team)
+    return frame(body)
+
+def build_gamecommand_cardselected(player_id, card_id, game_id=200,
+                                   instance_first=0, instance_second=0, select_set=0, version=3):
+    """GameCommand_CardSelected(60): the phase-4 STARTING-MISSION pick. Run FUN_005025a0 -> Game::cardSelected
+    FUN_004f5e90 -> StateMachine event 5 -> EQStartingLandscapeState records child[0x3c][player]=card; the
+    child's updateState case 2 then reads the map and advances SOG past phase 5. Without this the map stays
+    empty (child substate reads 0xBAADF00D) and StartOfGame stalls -> the seats->starscape bounce.
+    Byte-verified vs a live 2-client capture (.re/out/srv_deck58_tcg.log). NO turn/state validator on 60
+    (that gate is on ButtonPressed(62), FUN_00501170), so a 60 needs only: a live game (mCurrentTurn!=0),
+    card_id != 0, and a card the CURRENT state accepts -- a wrong/late id THROWS inside Game::cardSelected.
+    card_id is player-relative: player_index*1_000_000 + slot (starter decks: P1 1000060 / P2 2000060).
+    instance_first=0 makes the run skip the optional vt[0xac] and resolve the element by card_id alone."""
+    env  = (enc_int(60) + enc_int(version)) * 3               # depth-3 envelope, all (classid 60, ver 3)
+    body = env
+    body += enc_int(player_id)                                # GameCommand base: baseInt = player id
+    body += enc_int(game_id)                                  # base: Game ID (200)
+    body += b"\x00\x00\x02\x01\x00\x02\x00"                   # base v>=2 tail (verbatim from every real capture)
+    body += enc_int(card_id)                                  # +0x24 Selected Card ID
+    body += enc_int(instance_first)                           # +0x28 Instance first (0 ok -> skips vt[0xac])
+    body += enc_int(instance_second)                          # +0x2c Instance second
+    body += enc_int(player_id)                                # +0x30 Player ID (explicit copy)
+    body += enc_int(select_set)                               # +0x34 SelectSet
     return frame(body)
 
 def build_gamecommand_setplayer(player_id=1, game_id=200):
@@ -2448,17 +2584,31 @@ def handle(conn, addr, port):
                     # ChangeLobbyDisplay(291): run fires event 0x46 -> WALobbyManager builds+shows
                     # WALobbyScreen (the menu). Now the lobby model HAS groups, so the build's group
                     # lookup (FUN_1013a580) finds GID 100. env(291,3) + baseInt + displayId.
-                    PROBE_CLD = True
-                    if PROBE_CLD and not os.environ.get("SWGTCG_NO_LOBBY_BUILD"):
+                    # WHERE THE CLIENT LANDS AFTER LOGIN (see LOGIN_SCREEN, ~L785):
+                    #   "casual"/"tournaments" -> ChangeLobbyDisplay(291, display=100/5): event 0x46 -> hard-wired
+                    #     switchScreen(3, displayId) = the cat-3 room-lists. Also dismisses the login splash.
+                    #   "home" (DEFAULT) -> the Home hub WAMapScreen (screen-id 2). ChangeLobbyDisplay can't reach
+                    #     it; Home = switchScreen(2), fired by the nav handler ONLY for the special group id 1. So
+                    #     register a gid=1 type-1 group, then self-Join the local account to it -> membership-add
+                    #     drives switchScreen(2) -> Home + dismisses the splash (Home content is self-contained via
+                    #     the earlier News(457)/MOTD(309) pushes; no room list needed). RE agent a9abd715.
+                    #   SWGTCG_NO_LOBBY_BUILD suppresses all of it (client stays on the splash -- diagnostic only).
+                    if not os.environ.get("SWGTCG_NO_LOBBY_BUILD"):
                         time.sleep(0.1)
-                        # Which screen the client lands on at login. Default = casual (display=100). Set
-                        # SWGTCG_LOGIN_SCREEN=tournaments to land on the tournament lobby (display=5, the
-                        # hardcoded special case that builds tournamentlobby.ui) -- a guaranteed proof the
-                        # tournament screen renders + SetTournament(299) populates it, bypassing the button gate.
-                        login_disp = 5 if LOGIN_SCREEN == "tournaments" else 100
-                        cld = frame(env(291, 3) + enc_int(0) + enc_int(login_disp))
-                        conn.sendall(cld)
-                        log(port, n, "-> LobbyCommand_ChangeLobbyDisplay(291) display=%d (%d B): %s" % (login_disp, len(cld), hexdump(cld)))
+                        if LOGIN_SCREEN in ("casual", "tournaments"):
+                            login_disp = 5 if LOGIN_SCREEN == "tournaments" else 100
+                            cld = frame(env(291, 3) + enc_int(0) + enc_int(login_disp))
+                            conn.sendall(cld)
+                            log(port, n, "-> LobbyCommand_ChangeLobbyDisplay(291) display=%d (%d B): %s" % (login_disp, len(cld), hexdump(cld)))
+                        else:  # "home" -- drive switchScreen(2) via the gid=1 special case
+                            home_grp = frame(env(94, 3) + enc_int(0) + enc_int(1) + lobbygroup(0, 1, 1))
+                            conn.sendall(home_grp)
+                            time.sleep(0.05)
+                            home_join = frame(_env(92, [1, 1, 1]) + enc_int(ACCT) + enc_int(1) + enc_int(0))
+                            conn.sendall(home_join)
+                            log(port, n, "-> login screen = Home: AddGroups(gid=1,type=1)+self-Join(92,grp=1) -> switchScreen(2)/WAMapScreen")
+                    else:
+                        log(port, n, "-> SWGTCG_NO_LOBBY_BUILD: no lobby/home nav pushed (client stays on splash)")
                     # LOBBY_ONLY: populate the match browser -- add match-type groups (type=6) under the display
                     # WITHOUT joining the client, so "Matches: N" shows + the client can Create/Quick-Join.
                     if os.environ.get("SWGTCG_LOBBY_ONLY"):
@@ -2828,6 +2978,10 @@ if __name__ == "__main__":
     # session every boot (self-heals an expired/missing token or a swapped-in db).
     _sa = dbmod.ensure_standalone_account(_c)
     print("standalone account ready: id=%s (%s)" % (_sa, dbmod.STANDALONE_USERNAME))
+    # Optional 2nd account for local 1v1 PvP (two client instances). Mirrors StandAloneUser's decks.
+    if os.environ.get("SWGTCG_ENABLE_P2"):
+        _p2 = dbmod.ensure_second_player(_c)
+        print("2nd player (PvP) ready: id=%s (%s) session=%s" % (_p2, dbmod.SECOND_USERNAME, dbmod.SECOND_SESSION_ID))
     print("DB ready: %s (%d accounts)" % (config.DB_PATH,
           _c.execute("SELECT COUNT(*) FROM accounts").fetchone()[0]))
     _c.close()

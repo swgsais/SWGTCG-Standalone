@@ -1,115 +1,32 @@
 <#
-  SWGTCG-Standalone -- offline single-player launcher (server-login model).
+  SWGTCG-Standalone -- offline single-player launcher (text menu, server-login model).
 
-  Directory-independent: every path resolves from $PSScriptRoot, so the whole
-  SWGTCG-Standalone folder can be zipped, copied to any 64-bit Windows PC, and run.
+  Directory-independent: every path resolves from $PSScriptRoot, so the whole SWGTCG-Standalone
+  folder can be zipped, copied to any 64-bit Windows PC, and run.
 
   HOW IT WORKS
   ------------
-  The retail client greys out the game modes until it has logged in. This package
-  ships a tiny LOCAL login server (in _ext, bundled with its own Python runtime).
-  The launcher starts that server and launches the client with auto-login args, so
-  the Login screen is bypassed and PLAY becomes usable -- then Tutorials / Scenarios
-  / Skirmish run entirely on your machine (no internet, no real account).
+  The retail client greys out the game modes until it has logged in. This package ships a tiny LOCAL
+  login server (in _ext, bundled with its own Python runtime). The launcher starts that server and
+  launches the client with auto-login args, so the Login screen is bypassed and PLAY becomes usable --
+  then Tutorials / Scenarios / Skirmish run entirely on your machine (no internet, no real account).
 
-  ONE-TIME REQUIREMENT: two lines in the Windows hosts file must point the client's
-  login host at 127.0.0.1. Run "Add Hosts Entries.cmd" once (it self-elevates), or
-  add them by hand (see README.md). The launcher checks and warns if they're missing.
+  ONE-TIME REQUIREMENT: two lines in the Windows hosts file must point the client's login host at
+  127.0.0.1. Run "Add Hosts Entries.cmd" once (it self-elevates). The launcher checks and warns if missing.
+
+  All operations live in launcher-core.ps1 (shared with the GUI, launcher-gui.ps1); this file is just the
+  text menu + its prompts.
 #>
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'launcher-core.ps1')
 
-$Root    = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
-$Game    = Join-Path $Root 'TCGStandalone'
-$Exe     = Join-Path $Game 'SWGTCGGame.exe'
-$Manager = Join-Path $Root 'collectionmanager\index.html'
-$Backups = Join-Path $Root 'Backups'
-$Ext     = Join-Path $Root '_ext'
-$PyExe   = Join-Path $Ext 'python\python.exe'
-$Server  = Join-Path $Ext 'server\swgtcg_server.py'
-$SrvCwd  = Join-Path $Ext 'server'
-$Db      = Join-Path $Ext 'server\swgtcg.db'
-$HostsFile = Join-Path $env:WINDIR 'System32\drivers\etc\hosts'
-$HostNames = @('sdkccg-02-04.station.sony.com','sdkccg-02-11.station.sony.com')
-
-# Auto-login args: --host resolves (via hosts) to 127.0.0.1 = our local server.
-# The server binds the fixed sessionID below to the single StandAloneUser account (it
-# refreshes that session on every boot), so login always lands on StandAloneUser -- which
-# owns all four starter decks (Imperial / Jedi / Rebel / Sith). characterID is cosmetic here.
-$GameArgs = @(
-    '--realm=production',
-    '--host=sdkccg-02-04.station.sony.com',
-    '--username=StandAloneUser',
-    '--sessionID=deadbeefdeadbeef',
-    '--challenge=cafebabecafebabe',
-    '--characterID=1'
-)
-
-function Test-Install {
-    if ((Test-Path $Exe) -and (Test-Path $PyExe) -and (Test-Path $Server)) { return $true }
-    Write-Host ""
-    Write-Host "ERROR: package is incomplete. Expected:" -ForegroundColor Red
-    Write-Host "  $Exe"
-    Write-Host "  $PyExe"
-    Write-Host "  $Server"
-    return $false
-}
-
-function Test-Hosts {
-    $txt = Get-Content $HostsFile -ErrorAction SilentlyContinue
-    foreach ($h in $HostNames) {
-        $hit = $txt | Where-Object { $_ -notmatch '^\s*#' -and $_ -match [regex]::Escape($h) }
-        if (-not $hit) { return $false }
+function Invoke-Play {
+    if (-not (Test-Install)) {
+        Write-Host ""
+        Write-Host "ERROR: package is incomplete. Expected:" -ForegroundColor Red
+        Write-Host "  $Exe"; Write-Host "  $PyExe"; Write-Host "  $Server"
+        return
     }
-    return $true
-}
-
-function Test-ServerUp {
-    $c = Get-NetTCPConnection -LocalPort 16782 -State Listen -ErrorAction SilentlyContinue
-    return [bool]$c
-}
-
-function Start-Server {
-    if (Test-ServerUp) { Write-Host "Local login server already running." -ForegroundColor DarkGray; return }
-    $out = Join-Path $Ext 'server\server.log'
-    Start-Process -FilePath $PyExe -ArgumentList @('-u', $Server) -WorkingDirectory $SrvCwd `
-        -WindowStyle Hidden -RedirectStandardOutput $out -RedirectStandardError (Join-Path $Ext 'server\server.err.log') | Out-Null
-    for ($i = 0; $i -lt 15; $i++) { Start-Sleep -Milliseconds 400; if (Test-ServerUp) { break } }
-    if (Test-ServerUp) { Write-Host "Local login server started (127.0.0.1:16782/16783)." -ForegroundColor Green }
-    else { Write-Host "WARNING: login server did not open its port -- see _ext\server\server.err.log" -ForegroundColor Yellow }
-}
-
-# Remove SQLite sidecar journals (-wal/-shm/-journal). The server is force-killed on Stop,
-# so a leftover journal from a prior run must never survive next to the account DB: with the
-# DB swapped by the Collection Manager, a stale -wal would replay onto the new file and either
-# revert edits or corrupt it. Safe to delete because the server uses rollback (DELETE) journal
-# mode -- every committed write already lives in swgtcg.db itself, not in a sidecar.
-function Remove-DbSidecars {
-    foreach ($sfx in @('-wal', '-shm', '-journal')) {
-        $s = $Db + $sfx
-        if (Test-Path $s) { Remove-Item $s -Force -ErrorAction SilentlyContinue }
-    }
-}
-
-function Stop-Server {
-    $stopped = $false
-    # 1) our bundled python by exe path (the normal case)
-    $ours = Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
-            Where-Object { $_.ExecutablePath -eq (Resolve-Path $PyExe -ErrorAction SilentlyContinue).Path }
-    foreach ($p in $ours) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue; $stopped = $true }
-    # 2) fallback: kill whatever is actually holding the server ports, so [2] Manager always frees the DB
-    #    even if the process/path match above missed (e.g. server started differently).
-    foreach ($port in 16782, 16783) {
-        Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
-            Select-Object -ExpandProperty OwningProcess -Unique |
-            ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue; $stopped = $true }
-    }
-    if ($stopped) { Start-Sleep -Milliseconds 300 }   # let the OS release the file handle before we clean up
-    Remove-DbSidecars
-    if ($stopped) { Write-Host "Login server stopped." -ForegroundColor Green } else { Write-Host "Login server was not running." -ForegroundColor DarkGray }
-}
-
-function Start-Game {
-    if (-not (Test-Install)) { return }
     if (-not (Test-Hosts)) {
         Write-Host ""
         Write-Host "!! hosts entries are MISSING -- the client will NOT be able to log in and PLAY will stay greyed out." -ForegroundColor Red
@@ -119,82 +36,59 @@ function Start-Game {
         $go = Read-Host "Launch anyway? (y/N)"
         if ($go -notmatch '^[Yy]') { return }
     }
-    Start-Server
-    Start-Sleep -Seconds 2
     Write-Host ""
     Write-Host "Launching SWGTCG (auto-login, offline single-player)..." -ForegroundColor Green
-    Write-Host "The Login screen is bypassed. When the lobby appears:" -ForegroundColor Cyan
-    Write-Host "  left-edge Navigator -> PLAY -> Tutorials / Scenarios -> Skirmish -> Begin." -ForegroundColor Cyan
-    Start-Process -FilePath $Exe -ArgumentList $GameArgs -WorkingDirectory $Game | Out-Null
+    Write-Host "The Login screen is bypassed. You land on the Home screen -- move to the LEFT edge:" -ForegroundColor Cyan
+    Write-Host "  Navigator -> PLAY -> Tutorials / Scenarios / Skirmish -> Begin." -ForegroundColor Cyan
+    Start-Game | Out-Null
 }
 
-function Open-Manager {
+function Invoke-Manager {
     if (-not (Test-Path $Manager)) { Write-Host "Collection Manager not found at $Manager" -ForegroundColor Red; return }
-    Stop-Server   # release swgtcg.db so edits can be saved without conflict
     # Offer to build booster card art if it hasn't been extracted yet (images are never shipped).
-    $artDir = Join-Path $Root 'collectionmanager\art\images\card'
-    if (-not (Test-Path $artDir)) {
+    if (-not (Test-CardArtExtracted)) {
         Write-Host ""
         Write-Host "The Boosters tab can show real card art, but the images aren't extracted yet." -ForegroundColor Yellow
         $go = Read-Host "Extract card images now from your cards.rcc? (~140MB, one-time) (y/N)"
-        if ($go -match '^[Yy]') { Extract-CardArt }
-        else { Write-Host "Skipped. Boosters will list cards without art until you run [7] Extract card art." -ForegroundColor DarkGray }
+        if ($go -match '^[Yy]') {
+            if (-not (Extract-CardArt)) { Write-Host "Extractor or cards.rcc missing -- skipped." -ForegroundColor Red }
+        } else { Write-Host "Skipped. Boosters will list cards without art until you run [7] Extract card art." -ForegroundColor DarkGray }
     }
-    Start-Process $Manager | Out-Null
-    Write-Host "Opened the Collection & Deck Manager (login server stopped for safe editing)." -ForegroundColor Green
-    Write-Host "  In it: 'Open Account DB' -> _ext\server\swgtcg.db, edit, then 'Save to game'." -ForegroundColor Cyan
-    Write-Host "  If Save DOWNLOADS the file instead, use menu [6] to apply it, then [1] Play." -ForegroundColor Cyan
-}
-
-function Apply-EditedDb {
-    Stop-Server
-    $dl = Get-ChildItem (Join-Path $env:USERPROFILE 'Downloads') -Filter 'swgtcg*.db' -ErrorAction SilentlyContinue |
-          Sort-Object LastWriteTime -Descending | Select-Object -First 1
-    if (-not $dl) { Write-Host "No edited swgtcg*.db found in your Downloads folder -- Save it from the manager first." -ForegroundColor Yellow; return }
-    Remove-DbSidecars                       # drop any stale journal BEFORE swapping in the new image...
-    Copy-Item $dl.FullName $Db -Force
-    Remove-DbSidecars                       # ...and after, so nothing from the old db replays onto it
-    Write-Host "Applied '$($dl.Name)' (newest download) -> _ext\server\swgtcg.db. Choose [1] Play to use it." -ForegroundColor Green
-}
-
-function Extract-CardArt {
-    $tool = Join-Path $Ext 'tools\extract_card_art.py'
-    if (-not (Test-Path $tool)) { Write-Host "Extractor not found at $tool" -ForegroundColor Red; return }
-    $rcc = Join-Path $Game 'cards.rcc'
-    if (-not (Test-Path $rcc)) { Write-Host "cards.rcc not found at $rcc (ships with the game client)." -ForegroundColor Red; return }
-    Write-Host "Extracting card art from cards.rcc (~140MB, one-time; images are NOT shipped)..." -ForegroundColor Cyan
-    & $PyExe $tool
-    Write-Host "Open the Collection & Deck Manager -> Boosters to use them." -ForegroundColor Green
-}
-
-function Backup-Saves {
-    New-Item -ItemType Directory -Force -Path $Backups | Out-Null
-    $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-    $zip   = Join-Path $Backups "saves_$stamp.zip"
-    $paths = @()
-    foreach ($p in @((Join-Path $Ext 'server\swgtcg.db'), (Join-Path $Game 'data\collections'), (Join-Path $Game 'data\decks'))) {
-        if (Test-Path $p) { $paths += $p }
+    if (Open-Manager) {
+        Write-Host "Opened the Collection & Deck Manager (login server stopped for safe editing)." -ForegroundColor Green
+        Write-Host "  Opened its folder too -- swgtcg.db is highlighted in Explorer for the 'Open Account DB' picker." -ForegroundColor Cyan
+        Write-Host "  In it: 'Open Account DB' -> _ext\server\swgtcg.db, edit, then 'Save to game'." -ForegroundColor Cyan
+        Write-Host "  If Save DOWNLOADS the file instead, use menu [6] to apply it, then [1] Play." -ForegroundColor Cyan
     }
-    if ($paths.Count -eq 0) { Write-Host "Nothing to back up." -ForegroundColor Yellow; return }
-    Compress-Archive -Path $paths -DestinationPath $zip -Force
-    Write-Host "Backed up account DB + local collections/decks -> $zip" -ForegroundColor Green
 }
 
-function Restore-Saves {
-    Stop-Server   # release the DB before overwriting it
-    if (-not (Test-Path $Backups)) { Write-Host "No Backups folder yet." -ForegroundColor Yellow; return }
-    $zips = @(Get-ChildItem $Backups -Filter *.zip | Sort-Object LastWriteTime -Descending)
+function Invoke-Backup {
+    $zip = Backup-Saves
+    if ($zip) { Write-Host "Backed up account DB + local collections/decks -> $zip" -ForegroundColor Green }
+    else      { Write-Host "Nothing to back up." -ForegroundColor Yellow }
+}
+
+function Invoke-Restore {
+    $zips = Get-Backups
     if ($zips.Count -eq 0) { Write-Host "No backups found." -ForegroundColor Yellow; return }
     for ($k = 0; $k -lt $zips.Count; $k++) { Write-Host ("  [{0}] {1}" -f $k, $zips[$k].Name) }
     $sel = Read-Host "Number to restore (blank = cancel)"
     if ($sel -match '^\d+$' -and [int]$sel -lt $zips.Count) {
-        $tmp = Join-Path $env:TEMP ("swgrestore_" + [guid]::NewGuid().ToString('N'))
-        Expand-Archive -Path $zips[[int]$sel].FullName -DestinationPath $tmp -Force
-        if (Test-Path (Join-Path $tmp 'swgtcg.db')) { Remove-DbSidecars; Copy-Item (Join-Path $tmp 'swgtcg.db') $Db -Force; Remove-DbSidecars }
-        foreach ($d in @('collections','decks')) { if (Test-Path (Join-Path $tmp $d)) { Copy-Item (Join-Path $tmp $d) (Join-Path $Game 'data') -Recurse -Force } }
-        Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
-        Write-Host "Restored $($zips[[int]$sel].Name)" -ForegroundColor Green
+        if (Restore-Backup -ZipPath $zips[[int]$sel].FullName) { Write-Host "Restored $($zips[[int]$sel].Name)" -ForegroundColor Green }
+        else { Write-Host "Restore failed." -ForegroundColor Red }
     } else { Write-Host "Cancelled." }
+}
+
+function Invoke-Apply {
+    $name = Apply-EditedDb
+    if ($name) { Write-Host "Applied '$name' (newest download) -> _ext\server\swgtcg.db. Choose [1] Play to use it." -ForegroundColor Green }
+    else       { Write-Host "No edited swgtcg*.db found in your Downloads folder -- Save it from the manager first." -ForegroundColor Yellow }
+}
+
+function Invoke-Extract {
+    Write-Host "Extracting card art from cards.rcc (~140MB, one-time; images are NOT shipped)..." -ForegroundColor Cyan
+    if (Extract-CardArt) { Write-Host "Done. Open the Collection & Deck Manager -> Boosters to use them." -ForegroundColor Green }
+    else { Write-Host "Extractor not found, or cards.rcc missing (it ships with the game client)." -ForegroundColor Red }
 }
 
 $running = $true
@@ -203,7 +97,7 @@ try {
         $hostsOk = Test-Hosts
         Write-Host ""
         Write-Host "======================================================" -ForegroundColor DarkCyan
-        Write-Host "   Star Wars Galaxies TCG -- Standalone (offline)  V3"  -ForegroundColor White
+        Write-Host ("   Star Wars Galaxies TCG -- Standalone (offline)  " + $LauncherVersion)  -ForegroundColor White
         Write-Host "======================================================" -ForegroundColor DarkCyan
         Write-Host ("   hosts entries: " + $(if ($hostsOk) { "OK" } else { "MISSING (run 'Add Hosts Entries.cmd')" })) -ForegroundColor $(if ($hostsOk) { 'Green' } else { 'Yellow' })
         Write-Host ("   login server : " + $(if (Test-ServerUp) { "running" } else { "stopped" })) -ForegroundColor DarkGray
@@ -213,21 +107,30 @@ try {
         Write-Host "   [3] Backup saves      [4] Restore saves"
         Write-Host "   [5] Stop login server [6] Apply edited DB from Downloads"
         Write-Host "   [7] Extract card art  (build booster images from cards.rcc)"
-        Write-Host "   [Q] Quit (stops the login server)"
+        Write-Host "   [P] 1v1 PvP test      (two client windows -- experimental)"
+        Write-Host "   [G] GUI launcher      [Q] Quit (stops the login server)"
         $choice = Read-Host "Choose"
         switch ($choice.Trim().ToUpper()) {
-            '1'     { Start-Game }
-            '2'     { Open-Manager }
-            '3'     { Backup-Saves }
-            '4'     { Restore-Saves }
-            '5'     { Stop-Server }
-            '6'     { Apply-EditedDb }
-            '7'     { Extract-CardArt }
+            '1'     { Invoke-Play }
+            '2'     { Invoke-Manager }
+            '3'     { Invoke-Backup }
+            '4'     { Invoke-Restore }
+            '5'     { if (Stop-Server) { Write-Host "Login server stopped." -ForegroundColor Green } else { Write-Host "Login server was not running." -ForegroundColor DarkGray } }
+            '6'     { Invoke-Apply }
+            '7'     { Invoke-Extract }
+            'P'     {
+                        if (Start-TwoPlayerPvP) {
+                            Write-Host "1v1 PvP: server restarted in MP mode + two clients launched (StandAloneUser + Player2)." -ForegroundColor Green
+                            Write-Host "  In BOTH windows: Casual lobby -> P1 Create Match -> P2 Join -> both Ready." -ForegroundColor Cyan
+                            Write-Host "  Watch _ext\server\server.log. If the 2nd window doesn't open, the client is single-instance (tell me)." -ForegroundColor Cyan
+                        } else { Write-Host "PvP launch failed (client missing, or server didn't start)." -ForegroundColor Red }
+                    }
+            'G'     { Start-Process powershell.exe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-STA','-File', (Join-Path $PSScriptRoot 'launcher-gui.ps1')) | Out-Null }
             'Q'     { $running = $false }
             default { Write-Host "Unknown choice." -ForegroundColor Yellow }
         }
     }
 }
 finally {
-    Stop-Server
+    Stop-Server | Out-Null
 }

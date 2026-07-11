@@ -51,8 +51,11 @@ To undo, delete those two lines.
 ## Play
 
 1. Do the one-time setup above (and place the client &mdash; see above).
-2. Run **`Play SWGTCG.cmd`** &rarr; **[1] Play**.
-3. When the lobby appears, move to the **left edge** &rarr; the Navigator slides out.
+2. Launch either front-end:
+   - **`SWGTCG Launcher.cmd`** &mdash; the themed **GUI** (live server/game status + one-click **PLAY**
+     and every tool), or
+   - **`Play SWGTCG.cmd`** &rarr; **[1] Play** &mdash; the classic text menu.
+3. You land on the **Home** screen. Move to the **left edge** &rarr; the Navigator slides out.
    Click **PLAY &rarr; Tutorials / Scenarios**, then pick a mode:
    - **Tutorials** &mdash; guided lessons (ships its own decks)
    - **Scenarios** &mdash; story battles vs the AI
@@ -65,7 +68,8 @@ Your owned cards and decks live in the account database `_ext/server/swgtcg.db`
 &mdash; no web server needed.
 
 1. Launcher **[2] Collection & Deck Manager** (stops the login server so the DB is free,
-   and opens the tool).
+   opens the tool, and pops open its folder with `swgtcg.db` highlighted so you don't have to
+   hunt for it).
 2. **Open Account DB** &rarr; `_ext/server/swgtcg.db`; pick the account (default
    `tester1`); edit owned cards + build decks.
 3. **Save to game.** If the browser downloads `swgtcg.db` instead of saving in place,
@@ -75,8 +79,11 @@ Your owned cards and decks live in the account database `_ext/server/swgtcg.db`
 ## Layout
 
 ```
-Play SWGTCG.cmd        launcher entry (double-click)
-launcher.ps1           menu launcher (starts server + auto-login client)
+Play SWGTCG.cmd        text-menu launcher entry (double-click)
+SWGTCG Launcher.cmd    themed GUI launcher entry (double-click) -- status + one-click actions
+launcher.ps1           text menu (starts server + auto-login client)
+launcher-gui.ps1       GUI launcher (WinForms; live server/game status + all actions)
+launcher-core.ps1      shared launcher logic (server, DB, backup) used by both front-ends
 Add Hosts Entries.cmd  one-time hosts setup (self-elevating)
 Collection Manager.cmd opens the deck/collection tool
 _ext/                  bundled login server + embeddable Python + swgtcg.db

@@ -702,6 +702,49 @@ def ensure_standalone_account(conn):
     return aid
 
 
+# --- optional SECOND player for local 1v1 PvP testing (server SWGTCG_ENABLE_P2) --------------------
+# Mirrors StandAloneUser's collection + decks into a distinct account with its own fixed login session, so
+# two client instances can log in as two different players against the local server. standalone_cards (the
+# deck-seed data) is NOT shipped in this bundle -- the starter decks are baked into the shipped db -- so we
+# CLONE the source account's collection/decks rather than re-seeding from scratch.
+SECOND_USERNAME   = "Player2"
+SECOND_SESSION_ID = "feedfacefeedface"     # == launcher-core.ps1 $GameArgsP2 --sessionID
+SECOND_CHALLENGE  = "baddecafbaddecaf"     # == launcher-core.ps1 $GameArgsP2 --challenge
+
+def ensure_second_player(conn, source_username=None):
+    """Idempotent: guarantee a 2nd account (Player2) that MIRRORS the source account's collection + decks,
+    with a long-lived fixed session bound to it (character_id=2). Returns its account id (None if no source).
+    Safe every boot: clones only when the 2nd account has no decks yet; always refreshes the session."""
+    src = account_by_username(conn, source_username or STANDALONE_USERNAME)
+    if not src:
+        return None
+    src_id = src["id"]
+    acct = account_by_username(conn, SECOND_USERNAME)
+    aid = acct["id"] if acct else create_account(conn, SECOND_USERNAME, "player2")
+    if conn.execute("SELECT COUNT(*) FROM decks WHERE account_id=?", (aid,)).fetchone()[0] == 0:
+        conn.execute("INSERT OR IGNORE INTO collections(account_id, catalog_id, qty) "
+                     "SELECT ?, catalog_id, qty FROM collections WHERE account_id=?", (aid, src_id))
+        for d in conn.execute("SELECT id, name, avatar_catalog_id, is_starter FROM decks WHERE account_id=?",
+                              (src_id,)).fetchall():
+            cur = conn.execute(
+                "INSERT INTO decks(account_id, name, wire_deck_id, avatar_catalog_id, is_starter) "
+                "VALUES (?,?,?,?,?)",
+                (aid, d["name"], "p2_deck_%d" % d["id"], d["avatar_catalog_id"], d["is_starter"]))
+            new_did = cur.lastrowid
+            conn.execute("INSERT INTO deck_cards(deck_id, catalog_id, qty, slot) "
+                         "SELECT ?, catalog_id, qty, slot FROM deck_cards WHERE deck_id=?", (new_did, d["id"]))
+        row = conn.execute("SELECT id FROM decks WHERE account_id=? ORDER BY id LIMIT 1", (aid,)).fetchone()
+        if row:
+            conn.execute("UPDATE accounts SET last_deck_id=? WHERE id=?", (row["id"], aid))
+    conn.execute("DELETE FROM sessions WHERE session_id=?", (SECOND_SESSION_ID,))
+    conn.execute(
+        "INSERT INTO sessions(session_id, account_id, username, challenge, character_id, expires_at) "
+        "VALUES (?,?,?,?,2, datetime('now','+3650 days'))",
+        (SECOND_SESSION_ID, aid, SECOND_USERNAME, SECOND_CHALLENGE))
+    conn.commit()
+    return aid
+
+
 def reset_to_standalone(conn):
     """Collapse to exactly one StandAloneUser with every starter deck. SAFE ORDER: build the new
     account FIRST, verify it actually got its starter decks, and only THEN delete the others -- so a
