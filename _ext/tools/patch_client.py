@@ -26,16 +26,41 @@ import sys, os, struct, shutil
 
 VA_BASE = 0x400000
 
-# (name, VA, original_bytes, patched_bytes)
-# NOTE: game+0x139 is NOT force-patched here anymore -- forcing the reader to 1 globally makes the client
-# self-resolve the whole game (auto-plays both sides -> game-over -> starscape). Instead game+0x139 is
-# TOGGLED dynamically (1 for StartOfGame+opening-deal, 0 for networked play) -- prototyped in the cdb
-# harness (.re/harness/probe_sog_standalone.cdb), to be baked into a code-cave once the timing is proven.
+# (name, VA, original_bytes, patched_bytes, group)
+# Groups let you apply a subset:  patch ctrl   /   status ctrl   /   patch ctrl board
+# Default (no group arg) = ALL groups.
+#
+# --- group "sog" : the OLD self-resolve StartOfGame patches (single-player-style deal on each client) ---
+# NOTE: game+0x139 is NOT force-patched here -- forcing the reader to 1 globally self-resolves the whole game
+# (auto-plays both sides -> game-over -> starscape). It is toggled dynamically in the cdb harness instead.
+#
+# --- group "ctrl" : CONTROLLER-BUILD (M2). Hijack the online 80008 handler FUN_00642020 to build the real
+# 0x480 EQMainController (ctor FUN_0063f070, EQGame subobject at controller+8) instead of the bare 0x408 EQGame
+# (ctor FUN_0063a5e0). Proven live (probe_b2/b4): native 65/58 then populate the players and the board renders.
+#   push 408h @0x642093            -> push 480h                     (alloc the controller size)
+#   call 0x63a5e0 @0x6420b2        -> call shim @0x6420f5           (redirect to the controller ctor)
+#   int3 pad @0x6420f5 (9 of 11B)  -> shim: call 0x63f070; add eax,8; ret
+#     e8 76 cf ff ff  = call 0x63f070  (rel = 0x63f070-0x6420fa)
+#     83 c0 08        = add eax,8       (ctor returns controller; assert @0x6420c5 wants game=controller+8)
+#     c3              = ret             (-> 0x6420b7 with eax=controller+8)
+# Only affects the online path (offline uses createGame 0x6fa490, not 80008).
+#
+# --- group "board" : de-fang the board-build bounce. FUN_007f3f70 @0x7f40ea `je returnToMenu` when the
+# opponent seat screen+0x28 is null -> "bounce to starscape". NOP it so the board HOLDS (scaffold until the
+# server registers the opponent as a type-0xA LobbyService participant node -- see NETWORKED-PLAY-PLAN.md).
 PATCHES = [
     ("mission auto-pick gate (je -> NOP)",           0x0065a6c3,
-     bytes.fromhex("0f846b020000"),     bytes.fromhex("909090909090")),
+     bytes.fromhex("0f846b020000"),     bytes.fromhex("909090909090"), "sog"),
     ("mulligan skip (SOG phase 6 -> 7)",             0x0065e060,
-     bytes.fromhex("7428"),             bytes.fromhex("9090")),
+     bytes.fromhex("7428"),             bytes.fromhex("9090"),         "sog"),
+    ("ctrl: 80008 alloc 0x408 -> 0x480",             0x00642093,
+     bytes.fromhex("6808040000"),       bytes.fromhex("6880040000"),   "ctrl"),
+    ("ctrl: 80008 ctor 63a5e0 -> shim",              0x006420b2,
+     bytes.fromhex("e82985ffff"),       bytes.fromhex("e83e000000"),   "ctrl"),
+    ("ctrl: controller-ctor shim (cave)",            0x006420f5,
+     bytes.fromhex("cccccccccccccccccc"), bytes.fromhex("e876cfffff83c008c3"), "ctrl"),
+    ("board: de-fang bounce (je returnToMenu->NOP)", 0x007f40ea,
+     bytes.fromhex("0f84ba000000"),     bytes.fromhex("909090909090"), "board"),
 ]
 
 
@@ -66,6 +91,9 @@ def va_to_fileoff(data, va):
 
 def main():
     cmd = (sys.argv[1] if len(sys.argv) > 1 else "status").lower()
+    groups = set(g.lower() for g in sys.argv[2:])          # optional group filter; empty = all
+    def sel():
+        return [p for p in PATCHES if not groups or p[4] in groups]
     exe = exe_path()
     if not os.path.exists(exe):
         print("SWGTCGGame.exe not found at: %s" % exe); return 1
@@ -74,11 +102,11 @@ def main():
         data = bytearray(f.read())
 
     if cmd == "status":
-        for name, va, orig, patched in PATCHES:
+        for name, va, orig, patched, grp in sel():
             off = va_to_fileoff(data, va)
             cur = bytes(data[off:off + len(orig)])
             state = "PATCHED  " if cur == patched else ("unpatched" if cur == orig else "UNKNOWN  ")
-            print("[%s] %-42s VA 0x%x file 0x%x" % (state, name, va, off))
+            print("[%s] (%-5s) %-42s VA 0x%x file 0x%x" % (state, grp, name, va, off))
         return 0
 
     if cmd == "restore":
@@ -87,9 +115,9 @@ def main():
         print("No backup found at %s (nothing to restore)." % bak); return 1
 
     if cmd == "patch":
-        # validate ALL sites first
+        # validate selected sites first
         plan = []
-        for name, va, orig, patched in PATCHES:
+        for name, va, orig, patched, grp in sel():
             off = va_to_fileoff(data, va)
             cur = bytes(data[off:off + len(orig)])
             if cur == patched:
@@ -100,7 +128,7 @@ def main():
                 return 1
             plan.append((name, off, patched))
         if not plan:
-            print("All patches already applied -- nothing to do."); return 0
+            print("All selected patches already applied -- nothing to do."); return 0
         if not os.path.exists(bak):
             shutil.copy2(exe, bak); print("Backed up original -> %s" % bak)
         for name, off, patched in plan:
