@@ -49,10 +49,13 @@ VA_BASE = 0x400000
 # opponent seat screen+0x28 is null -> "bounce to starscape". NOP it so the board HOLDS (scaffold until the
 # server registers the opponent as a type-0xA LobbyService participant node -- see NETWORKED-PLAY-PLAN.md).
 PATCHES = [
+    # split out of the old "sog" group so mission-pick can run WITHOUT skipping the mulligan (the mulligan
+    # step is where the dealt opening hand is shown). `patch ctrl mission` = board + SOG barrier, hand+mulligan
+    # visible. `patch ctrl mission mulligan` = old "sog" behaviour (skip mulligan).
     ("mission auto-pick gate (je -> NOP)",           0x0065a6c3,
-     bytes.fromhex("0f846b020000"),     bytes.fromhex("909090909090"), "sog"),
+     bytes.fromhex("0f846b020000"),     bytes.fromhex("909090909090"), "mission"),
     ("mulligan skip (SOG phase 6 -> 7)",             0x0065e060,
-     bytes.fromhex("7428"),             bytes.fromhex("9090"),         "sog"),
+     bytes.fromhex("7428"),             bytes.fromhex("9090"),         "mulligan"),
     ("ctrl: 80008 alloc 0x408 -> 0x480",             0x00642093,
      bytes.fromhex("6808040000"),       bytes.fromhex("6880040000"),   "ctrl"),
     ("ctrl: 80008 ctor 63a5e0 -> shim",              0x006420b2,
