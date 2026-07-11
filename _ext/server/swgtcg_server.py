@@ -1347,7 +1347,11 @@ def _deck58_launch(n, mid, members, conns):
     for a, c in conns:
         if not c: continue
         try:
-            _mypid = 1 if a == seat_acct.get(1) else (2 if a == seat_acct.get(2) else 1)  # perspective seat
+            # perspective seat (my_player_id -> game+0x174 -> board-mgr+0x4C, read by seatHelperA 0x556830 to
+            # decide which EQPlayer is LOCAL/bottom). Live dump (probe_b8) showed the old 3-way ternary collapsed
+            # to 1 for P2 (its acct != seat_acct.get(2) in that comparison) -> both clients pinned player0 to the
+            # bottom seat = the split-seat bug. Robust 2-seat form: member0 -> 1, everyone else -> 2.
+            _mypid = 1 if a == seat_acct.get(1) else 2
             c.sendall(build_addgroups([(launch_gid, launch_gid, 6)]))   # 1. game-group (setGame resolve key)
             c.sendall(build_eq_launchgame(launch_gid, depth=depth))     # 2. 80008 fresh renderable EQGame
             time.sleep(0.2)
