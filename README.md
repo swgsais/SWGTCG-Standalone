@@ -1,3 +1,7 @@
+# THIS REPO IS NO LONGER MAINTAINED
+Visit https://tcg.galaxiesreborn.com to download the latest launcher.
+
+
 # SWGTCG-Standalone
 
 A self-contained, **offline single-player** setup for the retail *Star Wars Galaxies:
